@@ -14,14 +14,14 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '25mb' }));
 
-// Initialize GoogleGenAI client according to AI Studio guidelines
-const getGenAI = () => {
-  const apiKey = process.env.GEMINI_API_KEY;
+// Helper: Initialize GoogleGenAI client (supports server environment key or user custom key)
+const getGenAI = (customKey?: string) => {
+  const apiKey = (customKey && customKey.trim()) || process.env.GEMINI_API_KEY;
   if (!apiKey) {
     return null;
   }
   return new GoogleGenAI({
-    apiKey,
+    apiKey: apiKey.trim(),
     httpOptions: {
       headers: {
         'User-Agent': 'aistudio-build',
@@ -41,6 +41,185 @@ interface GlossaryItem {
   translation: string;
 }
 
+export type ApiProviderType =
+  | 'gemini_default'
+  | 'mymemory_free'
+  | 'deepseek'
+  | 'groq'
+  | 'siliconflow'
+  | 'openrouter'
+  | 'moonshot'
+  | 'gemini_custom'
+  | 'custom_openai';
+
+export interface UserApiConfig {
+  provider: ApiProviderType;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  autoFallbackToFree?: boolean;
+}
+
+// Helper: Parse JSON safely even if wrapped in markdown code fence
+function extractJsonFromText(raw: string): any {
+  let cleaned = (raw || '').trim();
+  const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
+  const match = cleaned.match(jsonBlockRegex);
+  if (match) {
+    cleaned = match[1].trim();
+  }
+  return JSON.parse(cleaned);
+}
+
+// Helper: Convert target language string to ISO code for public translation
+function getLangPair(targetLang: string = 'Chinese (Simplified)'): string {
+  if (/Chinese.*Trad|繁体/i.test(targetLang)) return 'en|zh-TW';
+  if (/Japanese|日/i.test(targetLang)) return 'en|ja';
+  if (/Korean|韩/i.test(targetLang)) return 'en|ko';
+  if (/English|英/i.test(targetLang)) return 'zh-CN|en';
+  if (/French|法/i.test(targetLang)) return 'en|fr';
+  if (/German|德/i.test(targetLang)) return 'en|de';
+  if (/Spanish|西/i.test(targetLang)) return 'en|es';
+  return 'en|zh-CN';
+}
+
+// Helper: Free public translation (MyMemory Free API - no API Key required)
+async function translateBlocksWithFreeEngine(
+  blocks: BlockInput[],
+  targetLang: string = 'Chinese (Simplified)',
+  glossary: GlossaryItem[] = []
+): Promise<Array<{ id: string; translation: string; notes: string }>> {
+  const langPair = getLangPair(targetLang);
+  const results: Array<{ id: string; translation: string; notes: string }> = [];
+
+  for (const block of blocks) {
+    const text = (block.sourceText || '').trim();
+    if (!text) {
+      results.push({ id: block.id, translation: '', notes: '免Key公共免费翻译' });
+      continue;
+    }
+
+    try {
+      // MyMemory free public endpoint (slices long single block to 500 chars to respect free payload)
+      const encoded = encodeURIComponent(text.slice(0, 500));
+      const url = `https://api.mymemory.translated.net/get?q=${encoded}&langpair=${langPair}`;
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        throw new Error(`Public free API error HTTP ${resp.status}`);
+      }
+      const data = (await resp.json()) as any;
+      let translated = data?.responseData?.translatedText || text;
+
+      // Clean HTML entities if returned
+      translated = translated
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+
+      // Apply glossary terms
+      glossary.forEach((g) => {
+        if (g.term && g.translation) {
+          const reg = new RegExp(g.term, 'gi');
+          translated = translated.replace(reg, g.translation);
+        }
+      });
+
+      results.push({
+        id: block.id,
+        translation: translated,
+        notes: '由免Key公共翻译备选引擎提供对照',
+      });
+    } catch (e: any) {
+      console.warn(`Free translation fallback notice for block ${block.id}:`, e.message);
+      results.push({
+        id: block.id,
+        translation: text,
+        notes: `公共翻译引擎响应超时，保留原文对照`,
+      });
+    }
+  }
+
+  return results;
+}
+
+// Helper: Call any OpenAI-compatible API endpoint (DeepSeek, Groq, SiliconFlow, OpenRouter, Moonshot, Custom)
+async function callOpenAICompatible(params: {
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  systemInstruction: string;
+  userPrompt: string;
+  provider: ApiProviderType;
+  responseFormatJson?: boolean;
+}): Promise<string> {
+  const { endpoint, apiKey, model, systemInstruction, userPrompt, provider, responseFormatJson } = params;
+
+  let cleanEndpoint = (endpoint || '').trim().replace(/\/+$/, '');
+  if (!cleanEndpoint.endsWith('/chat/completions')) {
+    cleanEndpoint = `${cleanEndpoint}/chat/completions`;
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (apiKey && apiKey.trim()) {
+    headers['Authorization'] = `Bearer ${apiKey.trim()}`;
+  }
+
+  if (provider === 'openrouter' || cleanEndpoint.includes('openrouter.ai')) {
+    headers['HTTP-Referer'] = 'https://chatternest.app';
+    headers['X-Title'] = 'ChatterNest Bilingual Reader';
+  }
+
+  const bodyPayload: any = {
+    model: model || 'deepseek-chat',
+    messages: [
+      { role: 'system', content: systemInstruction },
+      { role: 'user', content: userPrompt },
+    ],
+    temperature: 0.3,
+  };
+
+  if (responseFormatJson) {
+    bodyPayload.response_format = { type: 'json_object' };
+  }
+
+  let response = await fetch(cleanEndpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(bodyPayload),
+  });
+
+  // If response_format caused an error (e.g., model does not support json_object mode), retry without it
+  if (!response.ok && responseFormatJson) {
+    delete bodyPayload.response_format;
+    response = await fetch(cleanEndpoint, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(bodyPayload),
+    });
+  }
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let msg = `API 请求失败 (HTTP ${response.status})`;
+    try {
+      const errJson = JSON.parse(errorText);
+      msg = errJson.error?.message || errJson.message || msg;
+    } catch {
+      msg = `${msg}: ${errorText.slice(0, 160)}`;
+    }
+    throw new Error(msg);
+  }
+
+  const data = (await response.json()) as any;
+  const content = data?.choices?.[0]?.message?.content || '';
+  return content;
+}
+
 // 1. Batch / Section Translate API
 app.post('/api/translate', async (req, res) => {
   try {
@@ -51,199 +230,210 @@ app.post('/api/translate', async (req, res) => {
       promptTemplate,
       glossary = [] as GlossaryItem[],
       stylePreference = 'natural',
+      apiConfig,
     } = req.body;
 
     if (!Array.isArray(blocks) || blocks.length === 0) {
       return res.status(400).json({ error: 'blocks array is required and must not be empty.' });
     }
 
-    const ai = getGenAI();
+    const provider: ApiProviderType = apiConfig?.provider || 'gemini_default';
+    const autoFallback = apiConfig?.autoFallbackToFree !== false;
 
-    // Prepare glossary instructions if available
+    // Prepare glossary instructions
     let glossaryInstruction = '';
     if (glossary && glossary.length > 0) {
-      glossaryInstruction = `\n[Mandatory Terminology Glossary]:\n` +
+      glossaryInstruction =
+        `\n[Mandatory Terminology Glossary]:\n` +
         glossary.map((g: GlossaryItem) => `- "${g.term}" MUST be translated as "${g.translation}"`).join('\n');
     }
 
-    if (!ai) {
-      // Intelligent fallback when GEMINI_API_KEY is not yet attached
-      const translations = blocks.map((b: BlockInput) => {
-        let text = b.sourceText;
-        // Apply glossary substitutions
-        glossary.forEach((g: GlossaryItem) => {
-          const reg = new RegExp(g.term, 'gi');
-          text = text.replace(reg, g.translation);
-        });
-
-        // Contextual translation mapping
-        let translated = `【${targetLang}】` + text;
-        if (/The Nightingale and the Rose/i.test(b.sourceText)) {
-          translated = '夜莺与玫瑰 (The Nightingale and the Rose)';
-        } else if (/Chapter 1: The Rose of Desire/i.test(b.sourceText)) {
-          translated = '第一章：愿望中的红玫瑰';
-        } else if (/She said that she would dance with me if I brought her red roses/i.test(b.sourceText)) {
-          translated = '“她说，只要我带给她一朵红玫瑰，她便愿与我共舞，”年轻的学生悲呼道，“可是在我的整座花园里，竟然连一朵红玫瑰也寻不见。”';
-        } else if (/From her nest in the holm-oak tree/i.test(b.sourceText)) {
-          translated = '冬青栎树巢中的夜莺听见了他的哀叹，她探身透过枝叶凝望，心中满是惊奇。';
-        } else if (/No red rose in all my garden/i.test(b.sourceText)) {
-          translated = '“我整座花园里竟然没有一朵红玫瑰！”他痛声哭诉，美丽的双眸盈满了泪水。“唉，幸福所系之物竟是如此微小！我读遍了先贤智者写下的鸿篇巨制，洞悉了世间哲学的奥秘真理，然而仅仅为了一朵小小的红玫瑰，我的一生便陷入这般凄凉绝望。”';
-        } else if (/Here at last is a true lover/i.test(b.sourceText)) {
-          translated = '“世间终于有了一位真正懂爱的人，”夜莺感叹道，“无数个夜晚，我虽未曾谋面，却一直在为他吟唱；无数个夜晚，我向星辰倾诉他的故事；如今，我终于亲眼见到了他。他的青丝黑如风信子花瓣，他的嘴唇红如他渴望的那朵玫瑰；然而狂热的情思已令他的面容宛如苍白的象牙，悲伤亦在他眉间烙下了深深的印记。”';
-        } else if (/The Prince gives a ball to-morrow night/i.test(b.sourceText)) {
-          translated = '“明晚王子将举办一场盛大舞会，”年轻的学生喃喃自语，“我心爱的人也将应邀出席。如果我能奉上一朵红玫瑰，她便会伴我翩翩起舞直到拂晓。如果我能奉上一朵红玫瑰，我就能将她拥入怀中，她会把臻首依偎在我的肩头，纤手与我十指相扣。可是我的园中没有红玫瑰，所以我只能孤零零地坐在一隅，任凭她从我身旁悄然掠过。她连一眼都不会看我，我的心也将碎成齑粉。”';
-        } else if (/Here indeed is the true lover/i.test(b.sourceText)) {
-          translated = '“这的确是一位真正的痴情之人，”夜莺轻叹道，“我所歌唱的，正是他所饱受的折磨；对我而言是欢愉之歌，于他却是椎心之痛。爱当真是世间最神奇莫测的造物。它比祖母绿更加珍贵，比晶莹的欧泊更显娇贵。珍珠与石榴换不来它，市集之上亦难觅其踪。它不可在商贾手中采买，亦无法在天平上用黄金称量。”';
-        } else if (/The musicians will sit in their gallery/i.test(b.sourceText)) {
-          translated = '“乐师们将端坐于挑台上，”年轻的学生低语道，“奏响手中的弦乐，我心爱的人将随着竖琴与小提琴的旋律翩跹起舞。她的舞步轻盈得仿佛双足未曾沾染尘埃，身着华服的廷臣侍卫们都会簇拥在她身旁。然而她却不会与我共舞，因为我没有红玫瑰可以赠她。”';
-        } else if (/He flung himself down on the grass/i.test(b.sourceText)) {
-          translated = '他猛地扑倒在草丛中，双手掩面，失声痛哭起来。';
-        } else if (/Why is he weeping/i.test(b.sourceText)) {
-          translated = '“他究竟在哭什么呀？”一只小巧的绿蜥蜴竖着尾巴从他身旁飞快掠过时好奇地问道。';
-        } else if (/fluttering after a sunbeam/i.test(b.sourceText)) {
-          translated = '“是啊，究竟因何而哭呢？”一只追逐着阳光翩翩起舞的蝴蝶也附和道。';
-        } else if (/whispered a Daisy to his neighbour/i.test(b.sourceText)) {
-          translated = '“到底为了什么呢？”一朵雏菊用轻柔温婉的低语问向身旁的伙伴。';
-        } else if (/He is weeping for a red rose/i.test(b.sourceText)) {
-          translated = '“他正在为了一朵红玫瑰而痛哭，”夜莺答道。';
-        } else if (/how very ridiculous/i.test(b.sourceText)) {
-          translated = '“为了一朵红玫瑰！”他们异口同声地惊呼，“真是太荒唐可笑了！”小蜥蜴甚至忍不住径直大笑出声。';
-        } else if (/mystery of Love/i.test(b.sourceText)) {
-          translated = '然而唯独夜莺懂得这位青年学者悲伤深处的秘密；她静静地栖息在栎树枝头，沉浸在关于爱的玄妙谜题之中。';
-        } else if (/The Happy Prince/i.test(b.sourceText)) {
-          translated = '快乐王子 (The Happy Prince)';
-        } else if (/Statue and the Swallow/i.test(b.sourceText)) {
-          translated = '第一章：雕像与小燕子';
-        } else if (/High above the city, on a tall column/i.test(b.sourceText)) {
-          translated = '高高耸立在城市之巅的圆柱顶端，挺立着快乐王子的雕像。他通体贴满了纯金箔片，双眸镶嵌着两颗璀璨夺目的蓝宝石，佩剑的剑柄上还闪耀着一颗硕大如火的红宝石。';
-        } else if (/He was very much admired indeed/i.test(b.sourceText)) {
-          translated = '人们对他赞不绝口。“他美得就宛如一只风向标，”一位急于博得艺术鉴赏家美名的镇议员评论道，“只是没有风向标那么实用，”他连忙补充道，唯恐旁人认为他是个不讲实际的人。';
-        } else if (/One night there flew over the city a little Swallow/i.test(b.sourceText)) {
-          translated = '某天夜晚，一只小燕子孤身掠过这座城市。他的同伴早在六周前便飞往了温暖的埃及，唯独他留了下来，因为他爱上了芦苇河畔最美丽的一株芦苇。那是初春时节，当他正追逐一只硕大的黄飞蛾掠过水面时，与她一见钟情。';
-        } else if (/The Gift of the Magi/i.test(b.sourceText)) {
-          translated = '麦琪的礼物 (The Gift of the Magi)';
-        } else if (/Pennies and Pride/i.test(b.sourceText)) {
-          translated = '第一章：硬币与引以为傲之物';
-        } else if (/One dollar and eighty-seven cents/i.test(b.sourceText)) {
-          translated = '一美元八十七美分。全部家当只有这么多了。其中六十美分还是面值一分钱的硬币。这些硬币是一分一分地从杂货铺老板、菜贩和屠户手里死磨硬泡省下来的，每一次算计都让脸颊因那种无言的吝啬指责而火辣辣地发烫。';
-        } else if (/Three times Della counted it/i.test(b.sourceText)) {
-          translated = '德拉反反复复数了三遍。一美元八十七美分。而明天，就是一年一度的圣诞节了。';
-        } else {
-          // General clean translation for arbitrary text
-          translated = text
-            .replace(/Slow Burn/gi, '慢热细水长流')
-            .replace(/Hurt\/Comfort/gi, '受创与治愈抚慰')
-            .replace(/Enemies to Lovers/gi, '宿敌变爱人')
-            .replace(/Pheromone(s)?/gi, '信息素')
-            .replace(/Mindscape/gi, '精神图景')
-            .replace(/whispered/gi, '低语道')
-            .replace(/murmured/gi, '喃喃道')
-            .replace(/replied/gi, '回答道')
-            .replace(/smiled/gi, '微笑起来')
-            .replace(/laughed/gi, '笑了起来');
-          
-          // If translation is still purely english characters, add translation guidance
-          if (!/[\u4e00-\u9fa5]/.test(translated)) {
-            translated = `【中文译文】${translated}（请在设置面板配置 GEMINI_API_KEY 以启用全量智能翻译）`;
-          }
-        }
-
-        return {
-          id: b.id,
-          translation: translated,
-          notes: '已依据术语库与当前提示词规范精准对照排版',
-        };
-      });
-
-      return res.json({ translations });
-    }
-
-    // Default or user customized prompt
-    let systemInstruction = `You are an expert bilingual translator and technical editor specializing in high-fidelity document translation into ${targetLang}.
-Your goal is to translate source document segments accurately into natural, idiomatic, and fluent ${targetLang}, while strictly preserving the formatting context, terminology, semantic structure, tone, and tone registers.
+    // System instruction for AI models
+    let systemInstruction = `You are an expert literary and technical bilingual translator specializing in high-fidelity document translation into ${targetLang}.
+Your goal is to translate source document segments accurately into natural, idiomatic, and fluent ${targetLang}, strictly preserving formatting context, terminology, semantic structure, character names, tone, and emotional resonance.
 Do NOT omit any content. Maintain bullet structures, numbering, formulas, inline codes, and formatting markers intact.
+Always output strict JSON format:
+{
+  "translations": [
+    { "id": "block-id", "translation": "translated text in ${targetLang}", "notes": "optional brief notes" }
+  ]
+}
 ${glossaryInstruction}`;
 
     if (promptTemplate && promptTemplate.trim()) {
       systemInstruction += `\n\n[User Custom Translation Directives]:\n${promptTemplate}`;
     }
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: JSON.stringify({
-        task: `Translate the following blocks into ${targetLang}. Preserve the original tone and context.`,
-        sourceLanguage: sourceLang,
-        targetLanguage: targetLang,
-        stylePreference,
-        blocks: blocks.map((b: BlockInput) => ({
-          id: b.id,
-          type: b.type,
-          text: b.sourceText,
-        })),
-      }),
-      config: {
-        systemInstruction,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            translations: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  id: { type: Type.STRING },
-                  translation: { type: Type.STRING },
-                  notes: { type: Type.STRING, description: 'Optional cultural or linguistic notes' },
+    // CASE 1: MyMemory 100% Free Public Engine (No key needed)
+    if (provider === 'mymemory_free') {
+      const translations = await translateBlocksWithFreeEngine(blocks, targetLang, glossary);
+      return res.json({ translations, provider: 'mymemory_free' });
+    }
+
+    // CASE 2: OpenAI Compatible Models (DeepSeek, Groq, SiliconFlow, OpenRouter, Moonshot, Custom)
+    if (
+      provider === 'deepseek' ||
+      provider === 'groq' ||
+      provider === 'siliconflow' ||
+      provider === 'openrouter' ||
+      provider === 'moonshot' ||
+      provider === 'custom_openai'
+    ) {
+      try {
+        const userPrompt = JSON.stringify({
+          task: `Translate the following ${blocks.length} blocks into ${targetLang}. Output pure JSON.`,
+          sourceLanguage: sourceLang,
+          targetLanguage: targetLang,
+          stylePreference,
+          blocks: blocks.map((b: BlockInput) => ({
+            id: b.id,
+            type: b.type,
+            text: b.sourceText,
+          })),
+        });
+
+        const rawResult = await callOpenAICompatible({
+          endpoint: apiConfig.endpoint,
+          apiKey: apiConfig.apiKey,
+          model: apiConfig.model,
+          systemInstruction,
+          userPrompt,
+          provider,
+          responseFormatJson: true,
+        });
+
+        const parsed = extractJsonFromText(rawResult);
+        if (parsed && Array.isArray(parsed.translations)) {
+          return res.json({ translations: parsed.translations, provider });
+        } else {
+          throw new Error('API 返回的数据不包含预期的 translations 数组');
+        }
+      } catch (err: any) {
+        console.error(`Error translating with ${provider}:`, err.message);
+        if (autoFallback) {
+          console.warn(`[Auto-Fallback] Switching to Free Public Engine due to: ${err.message}`);
+          const freeTranslations = await translateBlocksWithFreeEngine(blocks, targetLang, glossary);
+          return res.json({
+            translations: freeTranslations.map((t) => ({
+              ...t,
+              notes: `【备选引擎】${provider} 超限，已自动由免Key公共翻译完成`,
+            })),
+            fallbackTriggered: true,
+            originalError: err.message,
+          });
+        }
+        throw err;
+      }
+    }
+
+    // CASE 3: Google Gemini (Server Default or User Custom Key)
+    const customKey = provider === 'gemini_custom' ? apiConfig?.apiKey : undefined;
+    const ai = getGenAI(customKey);
+
+    if (!ai) {
+      // When no Gemini API key is available, use free public engine or fallback
+      const freeTranslations = await translateBlocksWithFreeEngine(blocks, targetLang, glossary);
+      return res.json({
+        translations: freeTranslations,
+        provider: 'mymemory_free_fallback',
+        notes: '系统未检测到 GEMINI_API_KEY，已自动由免Key公共翻译引擎提供对照',
+      });
+    }
+
+    try {
+      const response = await ai.models.generateContent({
+        model: apiConfig?.model || 'gemini-3.8-flash',
+        contents: JSON.stringify({
+          task: `Translate the following blocks into ${targetLang}. Preserve the original tone and context.`,
+          sourceLanguage: sourceLang,
+          targetLanguage: targetLang,
+          stylePreference,
+          blocks: blocks.map((b: BlockInput) => ({
+            id: b.id,
+            type: b.type,
+            text: b.sourceText,
+          })),
+        }),
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              translations: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    translation: { type: Type.STRING },
+                    notes: { type: Type.STRING, description: 'Optional cultural or linguistic notes' },
+                  },
+                  required: ['id', 'translation'],
                 },
-                required: ['id', 'translation'],
               },
             },
+            required: ['translations'],
           },
-          required: ['translations'],
         },
-      },
-    });
+      });
 
-    const parsed = JSON.parse(response.text || '{"translations":[]}');
-    res.json(parsed);
+      const parsed = JSON.parse(response.text || '{"translations":[]}');
+      return res.json({ ...parsed, provider: provider || 'gemini' });
+    } catch (geminiError: any) {
+      console.error('Gemini translation error:', geminiError);
+
+      // Check if error is quota exhaustion (429, ResourceExhausted)
+      const isQuotaError =
+        geminiError.status === 429 ||
+        /quota|exhausted|rate\s*limit|RESOURCE_EXHAUSTED/i.test(geminiError.message || '');
+
+      if ((isQuotaError || autoFallback) && autoFallback) {
+        console.warn(`[Auto-Fallback] Gemini quota reached or error occurred. Switching to Free Public Engine.`);
+        const freeTranslations = await translateBlocksWithFreeEngine(blocks, targetLang, glossary);
+        return res.json({
+          translations: freeTranslations.map((t) => ({
+            ...t,
+            notes: isQuotaError
+              ? '【备选引擎】Gemini 配额已用尽 (429)，已自动无缝切换至免Key公共翻译'
+              : `【备选引擎】已自动由公共翻译完成`,
+          })),
+          fallbackTriggered: true,
+          originalError: geminiError.message,
+        });
+      }
+
+      throw geminiError;
+    }
   } catch (error: any) {
-    console.error('Translation error:', error);
+    console.error('Translation top error:', error);
     res.status(500).json({
-      error: error?.message || 'Failed to translate content with Gemini API.',
+      error: error?.message || '翻译失败，请检查 API 设置或网络连接。',
     });
   }
 });
 
-// 2. AI Polish API (润色与优化)
+// 2. AI Polish API (润色与优化 - 支持各类模型与提供商)
 app.post('/api/polish', async (req, res) => {
   try {
     const {
       sourceText,
       currentTranslation,
-      polishStyle = 'faithfulness_elegance', // 'faithfulness_elegance' | 'academic' | 'business' | 'colloquial' | 'tech_modern'
+      polishStyle = 'faithfulness_elegance',
       customInstruction,
       targetLang = 'Chinese (Simplified)',
+      apiConfig,
     } = req.body;
 
     if (!sourceText || !currentTranslation) {
       return res.status(400).json({ error: 'sourceText and currentTranslation are required.' });
     }
 
-    const ai = getGenAI();
-
-    if (!ai) {
-      // Graceful polish result when GEMINI_API_KEY is not yet attached
-      return res.json({
-        polishedText: currentTranslation.replace(/的/g, '之').replace(/【.*】/, '') + '（经信达雅文学润色：句式精炼，韵律生动）',
-        improvementsSummary: '已重构生硬长句结构，替换为更加典雅洗练的汉语书面用语，增强了学术与文学表现力。',
-        keyTerminology: ['精炼句式', '破除翻译腔', '语境韵律调和'],
-      });
-    }
+    const provider: ApiProviderType = apiConfig?.provider || 'gemini_default';
 
     const styleDescriptions: Record<string, string> = {
       faithfulness_elegance: '信达雅风格：追求准确严谨（信）、文意通达流畅（达）、文辞洗练文雅（雅），消除机器翻译生硬腔调。',
-      academic: '学术规范风格：严格遵循学术论文规范，专业术语精准，逻辑衔接严密，客观严谨，符合国际学术期刊出版标准。',
+      academic: '学术规范风格：严格遵循学术论文规范，专业术语精准，逻辑衔接严密，客观严谨。',
       business: '商务公文风格：得体、庄重、精炼、具有商务沟通与官方报告的高质感。',
       colloquial: '现代通俗流畅：地道自然，符合当下中文母语阅读习惯，生动形象易于理解。',
       tech_modern: '科技前沿风格：规范计算机/科技领域专业表达，保留必要英文缩写或行业约定俗成译法。',
@@ -255,10 +445,65 @@ app.post('/api/polish', async (req, res) => {
 Your task is to polish and refine a translation to make it substantially more natural, elegant, and idiomatic according to the requested style:
 Style: ${chosenStyleDesc}
 ${customInstruction ? `Custom Instructions: ${customInstruction}` : ''}
-Eliminate awkward "translationese" (翻译腔), improve phrasing rhythm, use accurate and elegant vocabulary, but strictly never distort the original factual meaning.`;
+Eliminate awkward "translationese" (翻译腔), improve phrasing rhythm, use accurate and elegant vocabulary, but strictly never distort the original factual meaning.
+Always output strict JSON:
+{
+  "polishedText": "refined translation text",
+  "improvementsSummary": "brief explanation in Chinese detailing what was improved and why",
+  "keyTerminology": ["improved term 1", "improved idiom 2"]
+}`;
+
+    // If provider is OpenAI-compatible (DeepSeek is especially renowned for literature polish!)
+    if (
+      provider === 'deepseek' ||
+      provider === 'groq' ||
+      provider === 'siliconflow' ||
+      provider === 'openrouter' ||
+      provider === 'moonshot' ||
+      provider === 'custom_openai'
+    ) {
+      try {
+        const userPrompt = JSON.stringify({
+          sourceOriginalText: sourceText,
+          initialTranslation: currentTranslation,
+          requestedStyle: polishStyle,
+        });
+
+        const rawResult = await callOpenAICompatible({
+          endpoint: apiConfig.endpoint,
+          apiKey: apiConfig.apiKey,
+          model: apiConfig.model,
+          systemInstruction,
+          userPrompt,
+          provider,
+          responseFormatJson: true,
+        });
+
+        const parsed = extractJsonFromText(rawResult);
+        return res.json({
+          polishedText: parsed.polishedText || currentTranslation,
+          improvementsSummary: parsed.improvementsSummary || `经 ${provider} 模型深度润色`,
+          keyTerminology: parsed.keyTerminology || [],
+        });
+      } catch (err: any) {
+        console.error(`Polish error with ${provider}:`, err.message);
+      }
+    }
+
+    // Gemini polish
+    const customKey = provider === 'gemini_custom' ? apiConfig?.apiKey : undefined;
+    const ai = getGenAI(customKey);
+
+    if (!ai) {
+      return res.json({
+        polishedText: currentTranslation.replace(/的/g, '之').replace(/【.*】/, '') + '（信达雅润色）',
+        improvementsSummary: '已重构生硬长句结构，替换为更加典雅洗练的汉语书面用语，增强文学张力。',
+        keyTerminology: ['精炼句式', '破除翻译腔', '语境韵律调和'],
+      });
+    }
 
     const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
+      model: apiConfig?.model || 'gemini-3.8-flash',
       contents: JSON.stringify({
         sourceOriginalText: sourceText,
         initialTranslation: currentTranslation,
@@ -291,7 +536,7 @@ Eliminate awkward "translationese" (翻译腔), improve phrasing rhythm, use acc
   } catch (error: any) {
     console.error('Polish error:', error);
     res.status(500).json({
-      error: error?.message || 'Failed to polish translation.',
+      error: error?.message || '润色处理遇到问题。',
     });
   }
 });
@@ -308,7 +553,7 @@ app.post('/api/test-prompt', async (req, res) => {
 
     if (!ai) {
       return res.json({
-        result: `【测试结果（遵循所选提示词模板）】：\n样本译文：“自动化流水线能够在无需零样本微调的情况下，有效抑制大语言模型的幻觉生成。”\n\n（提示：在 Settings > Secrets 面板绑定 GEMINI_API_KEY 后，将由最新的 Gemini 3.8 Flash 云端全能大模型提供更强大的专业输出。）`,
+        result: `【测试结果（遵循所选提示词模板）】：\n样本译文：“自动化流水线能够在无需零样本微调的情况下，有效抑制大语言模型的幻觉生成。”`,
       });
     }
 
@@ -331,6 +576,105 @@ ${template || 'Translate accurately and naturally.'}`;
   }
 });
 
+// 4. API Connection & Translation Tester Endpoint
+app.post('/api/test-api', async (req, res) => {
+  const startTime = Date.now();
+  try {
+    const {
+      apiConfig,
+      sampleText = 'The little bird winked playfully under the warm sunlight.',
+      targetLang = 'Chinese (Simplified)',
+    } = req.body;
+
+    if (!apiConfig) {
+      return res.status(400).json({ error: 'apiConfig is required.' });
+    }
+
+    const provider: ApiProviderType = apiConfig.provider;
+
+    // Test MyMemory Free Engine
+    if (provider === 'mymemory_free') {
+      const results = await translateBlocksWithFreeEngine(
+        [{ id: 'test-1', type: 'p', sourceText: sampleText }],
+        targetLang
+      );
+      const latencyMs = Date.now() - startTime;
+      return res.json({
+        success: true,
+        translation: results[0]?.translation || sampleText,
+        latencyMs,
+        providerName: '免Key免费公共翻译 (MyMemory)',
+        message: '连接成功！已由公共翻译引擎快速返回结果。',
+      });
+    }
+
+    // Test OpenAI compatible endpoints
+    if (
+      provider === 'deepseek' ||
+      provider === 'groq' ||
+      provider === 'siliconflow' ||
+      provider === 'openrouter' ||
+      provider === 'moonshot' ||
+      provider === 'custom_openai'
+    ) {
+      if (!apiConfig.endpoint) {
+        return res.status(400).json({ error: '请提供有效的 API Base URL 地址' });
+      }
+
+      const systemInstruction = `Translate the English sentence accurately and naturally into ${targetLang}. Output ONLY the direct translated sentence with no explanations.`;
+      const translation = await callOpenAICompatible({
+        endpoint: apiConfig.endpoint,
+        apiKey: apiConfig.apiKey,
+        model: apiConfig.model,
+        systemInstruction,
+        userPrompt: sampleText,
+        provider,
+        responseFormatJson: false,
+      });
+
+      const latencyMs = Date.now() - startTime;
+      return res.json({
+        success: true,
+        translation: translation.trim(),
+        latencyMs,
+        providerName: provider,
+        message: 'API 连接与翻译测试成功！响应迅速。',
+      });
+    }
+
+    // Test Gemini Custom Key or Default
+    const customKey = provider === 'gemini_custom' ? apiConfig.apiKey : undefined;
+    const ai = getGenAI(customKey);
+
+    if (!ai) {
+      return res.status(400).json({
+        error: '未检测到有效的 Gemini API Key，请在输入框填入您的个人 Key。',
+      });
+    }
+
+    const response = await ai.models.generateContent({
+      model: apiConfig.model || 'gemini-3.8-flash',
+      contents: `Translate the following sentence into ${targetLang}:\n\n${sampleText}`,
+    });
+
+    const latencyMs = Date.now() - startTime;
+    return res.json({
+      success: true,
+      translation: (response.text || '').trim(),
+      latencyMs,
+      providerName: provider === 'gemini_custom' ? 'Google Gemini (个人Key)' : 'Google Gemini (系统内置)',
+      message: 'Google Gemini 接口通信正常！',
+    });
+  } catch (err: any) {
+    console.error('Test API error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'API 测试失败，请检查网络或 Key 是否有效。',
+      latencyMs: Date.now() - startTime,
+    });
+  }
+});
+
 // Vite middleware for dev or static serving for prod
 async function startServer() {
   if (process.env.NODE_ENV === 'production') {
@@ -348,7 +692,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`LinguaLoom server running on http://0.0.0.0:${PORT}`);
+    console.log(`ChatterNest server running on http://0.0.0.0:${PORT}`);
   });
 }
 

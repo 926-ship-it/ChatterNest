@@ -15,8 +15,10 @@ import {
   PolishStyle,
   Bookmark as BookmarkType,
   BookshelfStory,
+  UserApiConfig,
 } from './types/document';
 import { THEMES, DEFAULT_PROMPT_TEMPLATES, INITIAL_GLOSSARY, SAMPLE_DOCUMENTS } from './data/presets';
+import { loadApiConfigFromStorage, saveApiConfigToStorage } from './data/apiPresets';
 import { parseHTMLToBlocks, parseAO3Document } from './utils/importer';
 import { loadBookshelfFromStorage, saveBookshelfToStorage } from './utils/bookshelfDefaults';
 import { calculateStoryStats } from './utils/readingTime';
@@ -25,6 +27,7 @@ import { BlockRow } from './components/BlockRow';
 import { StyleModal } from './components/StyleModal';
 import { PromptModal } from './components/PromptModal';
 import { PolishModal } from './components/PolishModal';
+import { ApiSettingsModal } from './components/ApiSettingsModal';
 import { ExportModal } from './components/ExportModal';
 import { ImportModal } from './components/ImportModal';
 import { BookmarkDrawer } from './components/BookmarkDrawer';
@@ -90,11 +93,18 @@ export default function App() {
   const [selectedTemplate, setSelectedTemplate] = useState<PromptTemplate>(DEFAULT_PROMPT_TEMPLATES[0]);
   const [customTemplates, setCustomTemplates] = useState<PromptTemplate[]>([]);
   const [glossary, setGlossary] = useState<GlossaryItem[]>(INITIAL_GLOSSARY);
+  const [apiConfig, setApiConfig] = useState<UserApiConfig>(() => loadApiConfigFromStorage());
+
+  // Sync API config to localStorage
+  useEffect(() => {
+    saveApiConfigToStorage(apiConfig);
+  }, [apiConfig]);
 
   // 4. Modal & Drawer States
   const [isImportOpen, setIsImportOpen] = useState(false);
   const [isStyleOpen, setIsStyleOpen] = useState(false);
   const [isPromptOpen, setIsPromptOpen] = useState(false);
+  const [isApiSettingsOpen, setIsApiSettingsOpen] = useState(false);
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isPolishOpen, setIsPolishOpen] = useState(false);
   const [isBookmarkDrawerOpen, setIsBookmarkDrawerOpen] = useState(false);
@@ -252,6 +262,7 @@ export default function App() {
           promptTemplate: getCompiledPromptTemplate(),
           glossary: activeGlossary,
           stylePreference: selectedTemplate.stylePreference,
+          apiConfig,
         }),
       });
 
@@ -317,6 +328,7 @@ export default function App() {
             promptTemplate: getCompiledPromptTemplate(),
             glossary: activeGlossary,
             stylePreference: selectedTemplate.stylePreference,
+            apiConfig,
           }),
         });
 
@@ -400,6 +412,7 @@ export default function App() {
             currentTranslation: b.targetText,
             polishStyle: style,
             customInstruction: `${customInstruction} ${typography.keepEnglishNames ? 'Keep character English names intact.' : ''}`,
+            apiConfig,
           }),
         });
 
@@ -668,6 +681,8 @@ export default function App() {
         onOpenBookshelf={() => setIsBookshelfOpen(true)}
         bookmarkCount={bookmarks.length}
         onOpenBookmarks={() => setIsBookmarkDrawerOpen(true)}
+        apiConfig={apiConfig}
+        onOpenApiSettings={() => setIsApiSettingsOpen(true)}
         onOpenImport={() => setIsImportOpen(true)}
         onOpenStyle={() => setIsStyleOpen(true)}
         onOpenPrompt={() => setIsPromptOpen(true)}
@@ -1038,9 +1053,17 @@ export default function App() {
         }}
         targetBlock={targetBlockForPolish}
         allBlocks={blocks}
+        apiConfig={apiConfig}
         onApplySinglePolish={handleApplySinglePolish}
         onBatchPolish={handleBatchPolish}
         isBatchPolishing={isBatchPolishing}
+      />
+
+      <ApiSettingsModal
+        isOpen={isApiSettingsOpen}
+        onClose={() => setIsApiSettingsOpen(false)}
+        apiConfig={apiConfig}
+        onSaveConfig={setApiConfig}
       />
 
       <ExportModal

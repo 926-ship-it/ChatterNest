@@ -10,13 +10,14 @@ import {
   FileText,
   Wand2,
 } from 'lucide-react';
-import { DocumentBlock, PolishStyle } from '../types/document';
+import { DocumentBlock, PolishStyle, UserApiConfig } from '../types/document';
 
 interface PolishModalProps {
   isOpen: boolean;
   onClose: () => void;
   targetBlock?: DocumentBlock | null;
   allBlocks: DocumentBlock[];
+  apiConfig?: UserApiConfig;
   onApplySinglePolish: (blockId: string, polishedText: string, record: any) => void;
   onBatchPolish: (style: PolishStyle, customInstruction: string) => Promise<void>;
   isBatchPolishing: boolean;
@@ -27,6 +28,7 @@ export const PolishModal: React.FC<PolishModalProps> = ({
   onClose,
   targetBlock,
   allBlocks,
+  apiConfig,
   onApplySinglePolish,
   onBatchPolish,
   isBatchPolishing,
@@ -104,6 +106,7 @@ export const PolishModal: React.FC<PolishModalProps> = ({
           currentTranslation: targetBlock.targetText || targetBlock.sourceText,
           polishStyle: selectedStyle,
           customInstruction,
+          apiConfig,
         }),
       });
 

@@ -132,3 +132,38 @@ export interface BookshelfStory {
   targetLang?: string;
 }
 
+export type ApiProviderType =
+  | 'gemini_default'
+  | 'mymemory_free'
+  | 'deepseek'
+  | 'groq'
+  | 'siliconflow'
+  | 'openrouter'
+  | 'moonshot'
+  | 'gemini_custom'
+  | 'custom_openai';
+
+export interface ApiProviderPreset {
+  id: ApiProviderType;
+  name: string;
+  badge: string;
+  badgeColor: string;
+  description: string;
+  requiresKey: boolean;
+  isFree: boolean;
+  defaultEndpoint: string;
+  defaultModel: string;
+  availableModels: string[];
+  keyPlaceholder: string;
+  keyHelpUrl?: string;
+  keyHelpText?: string;
+}
+
+export interface UserApiConfig {
+  provider: ApiProviderType;
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  autoFallbackToFree: boolean;
+}
+

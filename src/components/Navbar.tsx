@@ -15,9 +15,11 @@ import {
   BookOpen,
   Bookmark as BookmarkIcon,
   Library,
+  Cpu,
 } from 'lucide-react';
-import { ViewMode, DocumentMeta } from '../types/document';
+import { ViewMode, DocumentMeta, UserApiConfig } from '../types/document';
 import { WinkingBirdIcon } from './WinkingBirdIcon';
+import { API_PROVIDER_PRESETS } from '../data/apiPresets';
 
 
 interface NavbarProps {
@@ -28,6 +30,8 @@ interface NavbarProps {
   onOpenBookshelf: () => void;
   bookmarkCount: number;
   onOpenBookmarks: () => void;
+  apiConfig: UserApiConfig;
+  onOpenApiSettings: () => void;
   onOpenImport: () => void;
   onOpenStyle: () => void;
   onOpenPrompt: () => void;
@@ -47,6 +51,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenBookshelf,
   bookmarkCount,
   onOpenBookmarks,
+  apiConfig,
+  onOpenApiSettings,
   onOpenImport,
   onOpenStyle,
   onOpenPrompt,
@@ -60,6 +66,8 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const percent = totalCount > 0 ? Math.round((translatedCount / totalCount) * 100) : 0;
+  const currentPreset =
+    API_PROVIDER_PRESETS.find((p) => p.id === apiConfig?.provider) || API_PROVIDER_PRESETS[0];
 
   return (
     <header className="no-print sticky top-0 z-40 w-full border-b border-black/10 bg-white/95 backdrop-blur-md dark:border-white/10 dark:bg-zinc-900/95 transition-colors">
@@ -196,6 +204,19 @@ export const Navbar: React.FC<NavbarProps> = ({
                   {bookmarkCount}
                 </span>
               )}
+            </button>
+
+            {/* API Engine & Free Fallback Settings */}
+            <button
+              onClick={onOpenApiSettings}
+              className="flex items-center gap-1.5 rounded-lg border border-blue-200 dark:border-blue-900/60 bg-blue-50/70 dark:bg-blue-950/40 px-2.5 py-1.5 text-xs font-semibold text-blue-900 dark:text-blue-200 hover:bg-blue-100 shadow-xs transition"
+              title="配置翻译引擎 API (免Key公共翻译、DeepSeek、Groq及自定义Key)"
+            >
+              <Cpu className="h-3.5 w-3.5 text-blue-600 dark:text-blue-400" />
+              <span>API服务</span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full font-medium bg-blue-600 text-white font-mono">
+                {currentPreset.name.split(' ')[0]}
+              </span>
             </button>
 
             {/* Style */}
@@ -380,6 +401,22 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
 
                 <div className="h-px bg-zinc-100 dark:bg-zinc-800 my-1" />
+
+                <button
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    onOpenApiSettings();
+                  }}
+                  className="w-full flex items-center justify-between px-3 py-2 text-xs font-semibold text-blue-900 dark:text-blue-200 bg-blue-50/60 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-900/40 rounded-lg text-left"
+                >
+                  <span className="flex items-center gap-2">
+                    <Cpu className="h-4 w-4 text-blue-600 dark:text-blue-400" />
+                    <span>API服务与免费备选</span>
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.2 rounded bg-blue-600 text-white font-mono">
+                    {currentPreset.name.split(' ')[0]}
+                  </span>
+                </button>
 
                 <button
                   onClick={onOpenStyle}
