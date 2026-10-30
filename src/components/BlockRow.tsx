@@ -30,7 +30,7 @@ interface BlockRowProps {
   onOpenPolishSingle: (block: DocumentBlock) => void;
 }
 
-export const BlockRow: React.FC<BlockRowProps> = ({
+export const BlockRow = React.memo<BlockRowProps>(({
   block,
   index,
   viewMode,
@@ -665,4 +665,4 @@ export const BlockRow: React.FC<BlockRowProps> = ({
       )}
     </div>
   );
-};
+});

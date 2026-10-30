@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   DocumentBlock,
   DocumentMeta,
@@ -150,7 +150,17 @@ export default function App() {
     }
   });
   const [autoTranslateNotice, setAutoTranslateNotice] = useState<string | null>(null);
+  const [autoQueueTrigger, setAutoQueueTrigger] = useState(0);
   const isAutoLoopRunningRef = useRef(false);
+
+  // Keep a synchronized ref to blocks so asynchronous background workers always see latest blocks without causing re-render loops
+  const blocksRef = useRef(blocks);
+  blocksRef.current = blocks;
+
+  // Whenever blocks change length (e.g. story loaded or imported), trigger queue
+  useEffect(() => {
+    setAutoQueueTrigger((t) => t + 1);
+  }, [blocks.length]);
 
   const toggleAutoTranslate = () => {
     setAutoTranslateEnabled((prev) => {
@@ -264,10 +274,13 @@ export default function App() {
       (b) => !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText
     );
     if (untranslatedIdx !== -1) {
-      const el = document.getElementById(`block-${blocks[untranslatedIdx].id}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
+      setCurrentReadBlock(untranslatedIdx + 1);
+      setTimeout(() => {
+        const el = document.getElementById(`block-${blocks[untranslatedIdx].id}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }, 50);
     }
   };
 
@@ -386,27 +399,28 @@ export default function App() {
 
   // Auto-Translate Stream Engine: Streams translation ahead of current reading position
   useEffect(() => {
-    if (!autoTranslateEnabled || isTranslating || blocks.length === 0) {
+    if (!autoTranslateEnabled || isTranslating || blocksRef.current.length === 0) {
       return;
     }
 
+    const currentBlocks = blocksRef.current;
     const isUntranslated = (b: DocumentBlock) =>
       !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText;
 
     // Prioritize blocks in/near viewport starting from current read block index
     const readIndex = Math.max(0, currentReadBlock - 1);
     // Immediate downstream (the next 20 blocks directly in front of the reader)
-    const immediateDownstream = blocks
+    const immediateDownstream = currentBlocks
       .slice(readIndex, readIndex + 20)
       .filter((b) => isUntranslated(b) && !b.isTranslating);
 
     // Far downstream
-    const farDownstream = blocks
+    const farDownstream = currentBlocks
       .slice(readIndex + 20)
       .filter((b) => isUntranslated(b) && !b.isTranslating);
 
     // Upstream (if user skipped any earlier)
-    const upstream = blocks
+    const upstream = currentBlocks
       .slice(0, readIndex)
       .filter((b) => isUntranslated(b) && !b.isTranslating);
 
@@ -425,8 +439,10 @@ export default function App() {
     const batch = candidates.slice(0, 8);
     const batchIds = new Set(batch.map((b) => b.id));
 
+    let isCancelled = false;
+
     const timer = setTimeout(async () => {
-      if (isAutoLoopRunningRef.current) return;
+      if (isAutoLoopRunningRef.current || isCancelled) return;
       isAutoLoopRunningRef.current = true;
 
       setBlocks((prev) =>
@@ -448,6 +464,8 @@ export default function App() {
           stylePreference: selectedTemplate.stylePreference,
           apiConfig,
         });
+
+        if (isCancelled) return;
 
         const map = new Map<string, { translation: string; notes?: string }>();
         (result.translations || []).forEach((t: any) => {
@@ -476,9 +494,19 @@ export default function App() {
 
         if (result.ok) {
           setAutoTranslateNotice(null);
+          // Calm delay before queuing next batch so UI remains completely responsive
+          setTimeout(() => {
+            if (!isCancelled) {
+              setAutoQueueTrigger((t) => t + 1);
+            }
+          }, 150);
         } else {
           setAutoTranslateNotice(`伴读流提示: ${result.error || '请求受阻，将自动顺延重试'}`);
-          await new Promise((r) => setTimeout(r, 2000));
+          setTimeout(() => {
+            if (!isCancelled) {
+              setAutoQueueTrigger((t) => t + 1);
+            }
+          }, 2500);
         }
       } catch (err: any) {
         console.warn('Auto stream translate warning:', err);
@@ -486,17 +514,24 @@ export default function App() {
           prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: false } : b))
         );
         setAutoTranslateNotice(`伴读翻译提示: ${err.message || '网络连接异常'}，稍后将自动续译`);
-        await new Promise((r) => setTimeout(r, 2000));
+        setTimeout(() => {
+          if (!isCancelled) {
+            setAutoQueueTrigger((t) => t + 1);
+          }
+        }, 2500);
       } finally {
         isAutoLoopRunningRef.current = false;
       }
     }, 60);
 
-    return () => clearTimeout(timer);
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
   }, [
     autoTranslateEnabled,
     isTranslating,
-    blocks,
+    autoQueueTrigger,
     currentReadBlock,
     meta.sourceLang,
     meta.targetLang,
@@ -851,13 +886,19 @@ export default function App() {
   };
 
   const handleJumpToBlock = (blockId: string) => {
-    const el = document.getElementById(`block-${blockId}`);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      setHighlightedBlockId(blockId);
+    const idx = blocks.findIndex((b) => b.id === blockId);
+    if (idx !== -1) {
+      setCurrentReadBlock(idx + 1);
       setTimeout(() => {
-        setHighlightedBlockId((curr) => (curr === blockId ? null : curr));
-      }, 2500);
+        const el = document.getElementById(`block-${blockId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setHighlightedBlockId(blockId);
+          setTimeout(() => {
+            setHighlightedBlockId((curr) => (curr === blockId ? null : curr));
+          }, 2500);
+        }
+      }, 50);
     }
   };
 
@@ -875,12 +916,39 @@ export default function App() {
     setBookmarks([]);
   };
 
-  const translatedCount = blocks.filter(
-    (b) => b.targetText && b.targetText.trim() && b.targetText !== b.sourceText
-  ).length;
+  const translatedCount = useMemo(() => {
+    return blocks.filter(
+      (b) => b.targetText && b.targetText.trim() && b.targetText !== b.sourceText
+    ).length;
+  }, [blocks]);
 
   // Reading time and word count statistics for current article
-  const currentStoryStats = calculateStoryStats(blocks, meta.ao3Meta?.stats?.words);
+  const currentStoryStats = useMemo(() => {
+    return calculateStoryStats(blocks, meta.ao3Meta?.stats?.words);
+  }, [blocks, meta.ao3Meta?.stats?.words]);
+
+  // Virtual Progressive Windowing for huge documents (prevents browser freezing on 10,000+ paragraphs)
+  const isLargeStory = blocks.length > 80;
+  const BUFFER_BEFORE = 35;
+  const BUFFER_AFTER = 55;
+
+  const visibleRange = useMemo(() => {
+    if (!isLargeStory) {
+      return { start: 0, end: blocks.length };
+    }
+    const center = Math.max(0, currentReadBlock - 1);
+    const start = Math.max(0, center - BUFFER_BEFORE);
+    const end = Math.min(blocks.length, center + BUFFER_AFTER);
+    return { start, end };
+  }, [isLargeStory, blocks.length, currentReadBlock]);
+
+  const visibleBlocks = useMemo(() => {
+    if (!isLargeStory) return blocks;
+    return blocks.slice(visibleRange.start, visibleRange.end);
+  }, [isLargeStory, blocks, visibleRange.start, visibleRange.end]);
+
+  const topSpacerHeight = isLargeStory ? visibleRange.start * 96 : 0;
+  const bottomSpacerHeight = isLargeStory ? (blocks.length - visibleRange.end) * 96 : 0;
 
   return (
     <div
@@ -1209,25 +1277,42 @@ export default function App() {
                 </div>
               )}
 
-              {/* Render Blocks */}
+              {/* Render Blocks with Virtual Progressive Windowing */}
               <div className="divide-y divide-black/5 dark:divide-white/5">
-                {blocks.map((block, idx) => (
-                  <BlockRow
-                    key={block.id}
-                    block={block}
-                    index={idx}
-                    viewMode={viewMode}
-                    typography={typography}
-                    theme={currentTheme}
-                    autoTranslateEnabled={autoTranslateEnabled}
-                    isBookmarked={bookmarks.some((b) => b.blockId === block.id)}
-                    isHighlighted={highlightedBlockId === block.id}
-                    onToggleBookmark={handleToggleBookmark}
-                    onUpdateTargetText={handleUpdateTargetText}
-                    onTranslateSingle={handleTranslateSingle}
-                    onOpenPolishSingle={handleOpenPolishSingle}
+                {topSpacerHeight > 0 && (
+                  <div
+                    style={{ height: `${topSpacerHeight}px` }}
+                    className="w-full pointer-events-none select-none"
+                    aria-hidden="true"
                   />
-                ))}
+                )}
+                {visibleBlocks.map((block, i) => {
+                  const actualIndex = visibleRange.start + i;
+                  return (
+                    <BlockRow
+                      key={block.id}
+                      block={block}
+                      index={actualIndex}
+                      viewMode={viewMode}
+                      typography={typography}
+                      theme={currentTheme}
+                      autoTranslateEnabled={autoTranslateEnabled}
+                      isBookmarked={bookmarks.some((b) => b.blockId === block.id)}
+                      isHighlighted={highlightedBlockId === block.id}
+                      onToggleBookmark={handleToggleBookmark}
+                      onUpdateTargetText={handleUpdateTargetText}
+                      onTranslateSingle={handleTranslateSingle}
+                      onOpenPolishSingle={handleOpenPolishSingle}
+                    />
+                  );
+                })}
+                {bottomSpacerHeight > 0 && (
+                  <div
+                    style={{ height: `${bottomSpacerHeight}px` }}
+                    className="w-full pointer-events-none select-none"
+                    aria-hidden="true"
+                  />
+                )}
               </div>
             </div>
           )}
@@ -1318,8 +1403,10 @@ export default function App() {
         </button>
       </div>
 
-      {/* Hidden Print Container for High-Fidelity Vector PDF Export */}
-      <PrintContainer blocks={blocks} meta={meta} typography={typography} />
+      {/* Hidden Print Container for High-Fidelity Vector PDF Export - only mounted when exporting */}
+      {isExportOpen && (
+        <PrintContainer blocks={blocks} meta={meta} typography={typography} />
+      )}
 
       {/* Modals */}
       <StyleModal
