@@ -269,6 +269,29 @@ export default function App() {
     return () => window.removeEventListener('scroll', onScroll);
   }, [blocks.length]);
 
+  // Virtual Progressive Windowing for huge documents (prevents browser freezing on 10,000+ paragraphs)
+  const isLargeStory = blocks.length > 80;
+  const BUFFER_BEFORE = 35;
+  const BUFFER_AFTER = 55;
+
+  const visibleRange = useMemo(() => {
+    if (!isLargeStory) {
+      return { start: 0, end: blocks.length };
+    }
+    const center = Math.max(0, currentReadBlock - 1);
+    const start = Math.max(0, center - BUFFER_BEFORE);
+    const end = Math.min(blocks.length, center + BUFFER_AFTER);
+    return { start, end };
+  }, [isLargeStory, blocks.length, currentReadBlock]);
+
+  const visibleBlocks = useMemo(() => {
+    if (!isLargeStory) return blocks;
+    return blocks.slice(visibleRange.start, visibleRange.end);
+  }, [isLargeStory, blocks, visibleRange.start, visibleRange.end]);
+
+  const topSpacerHeight = isLargeStory ? visibleRange.start * 96 : 0;
+  const bottomSpacerHeight = isLargeStory ? (blocks.length - visibleRange.end) * 96 : 0;
+
   const handleJumpToUntranslated = () => {
     const untranslatedIdx = blocks.findIndex(
       (b) => !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText
@@ -397,7 +420,48 @@ export default function App() {
     }
   };
 
-  // Auto-Translate Stream Engine: Streams translation ahead of current reading position
+  // Real-time Viewport Intersection Observer: Detects which blocks are physically visible on screen
+  const visibleBlockIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let hasNewVisible = false;
+        entries.forEach((entry) => {
+          const id = entry.target.getAttribute('data-block-id');
+          if (!id) return;
+          if (entry.isIntersecting) {
+            if (!visibleBlockIdsRef.current.has(id)) {
+              visibleBlockIdsRef.current.add(id);
+              hasNewVisible = true;
+            }
+          } else {
+            visibleBlockIdsRef.current.delete(id);
+          }
+        });
+
+        if (hasNewVisible) {
+          // Immediately trigger translate loop for blocks entering view!
+          setAutoQueueTrigger((t) => t + 1);
+        }
+      },
+      {
+        root: null,
+        // Prefetch buffer: 250px above viewport and 600px below viewport so scrolling is seamless
+        rootMargin: '250px 0px 600px 0px',
+        threshold: 0.02,
+      }
+    );
+
+    const elements = document.querySelectorAll('.reader-block-row');
+    elements.forEach((el) => observer.observe(el));
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [visibleBlocks]);
+
+  // Scroll-to-Translate Engine: Translates whatever is visible on screen with top priority!
   useEffect(() => {
     if (!autoTranslateEnabled || isTranslating || blocksRef.current.length === 0) {
       return;
@@ -407,38 +471,48 @@ export default function App() {
     const isUntranslated = (b: DocumentBlock) =>
       !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText;
 
-    // Prioritize blocks in/near viewport starting from current read block index
+    // 1. TOP PRIORITY: Untranslated blocks currently visible inside the viewport!
+    const visibleUntranslated = currentBlocks.filter(
+      (b) => visibleBlockIdsRef.current.has(b.id) && isUntranslated(b) && !b.isTranslating
+    );
+
+    // 2. SECOND PRIORITY: Downstream blocks directly ahead of current reading block
     const readIndex = Math.max(0, currentReadBlock - 1);
-    // Immediate downstream (the next 20 blocks directly in front of the reader)
-    const immediateDownstream = currentBlocks
-      .slice(readIndex, readIndex + 20)
+    const downstream = currentBlocks
+      .slice(readIndex, readIndex + 25)
       .filter((b) => isUntranslated(b) && !b.isTranslating);
 
-    // Far downstream
+    // 3. THIRD PRIORITY: Remaining blocks
     const farDownstream = currentBlocks
-      .slice(readIndex + 20)
+      .slice(readIndex + 25)
       .filter((b) => isUntranslated(b) && !b.isTranslating);
-
-    // Upstream (if user skipped any earlier)
     const upstream = currentBlocks
       .slice(0, readIndex)
       .filter((b) => isUntranslated(b) && !b.isTranslating);
 
-    const candidates =
-      immediateDownstream.length > 0
-        ? immediateDownstream
-        : farDownstream.length > 0
-        ? farDownstream
-        : upstream;
+    let batch: DocumentBlock[] = [];
+    if (visibleUntranslated.length > 0) {
+      batch = visibleUntranslated.slice(0, 8);
+      if (batch.length < 8) {
+        // Pre-fetch downstream blocks to fill batch of 8
+        const additional = downstream
+          .filter((b) => !batch.some((x) => x.id === b.id))
+          .slice(0, 8 - batch.length);
+        batch = [...batch, ...additional];
+      }
+    } else if (downstream.length > 0) {
+      batch = downstream.slice(0, 8);
+    } else if (farDownstream.length > 0) {
+      batch = farDownstream.slice(0, 8);
+    } else {
+      batch = upstream.slice(0, 8);
+    }
 
-    if (candidates.length === 0) {
+    if (batch.length === 0) {
       return; // Everything translated
     }
 
-    // High-speed parallel batch: 8 blocks concurrently!
-    const batch = candidates.slice(0, 8);
     const batchIds = new Set(batch.map((b) => b.id));
-
     let isCancelled = false;
 
     const timer = setTimeout(async () => {
@@ -499,9 +573,9 @@ export default function App() {
             if (!isCancelled) {
               setAutoQueueTrigger((t) => t + 1);
             }
-          }, 150);
+          }, 100);
         } else {
-          setAutoTranslateNotice(`伴读流提示: ${result.error || '请求受阻，将自动顺延重试'}`);
+          setAutoTranslateNotice(`随译流提示: ${result.error || '请求受阻，将自动顺延重试'}`);
           setTimeout(() => {
             if (!isCancelled) {
               setAutoQueueTrigger((t) => t + 1);
@@ -509,11 +583,11 @@ export default function App() {
           }, 2500);
         }
       } catch (err: any) {
-        console.warn('Auto stream translate warning:', err);
+        console.warn('Scroll translate warning:', err);
         setBlocks((prev) =>
           prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: false } : b))
         );
-        setAutoTranslateNotice(`伴读翻译提示: ${err.message || '网络连接异常'}，稍后将自动续译`);
+        setAutoTranslateNotice(`翻译提示: ${err.message || '网络连接异常'}，稍后将自动续译`);
         setTimeout(() => {
           if (!isCancelled) {
             setAutoQueueTrigger((t) => t + 1);
@@ -522,7 +596,7 @@ export default function App() {
       } finally {
         isAutoLoopRunningRef.current = false;
       }
-    }, 60);
+    }, 30);
 
     return () => {
       isCancelled = true;
@@ -775,6 +849,7 @@ export default function App() {
     });
     setBlocks(target.blocks || []);
     setBookmarks(target.bookmarks || []);
+    setAutoTranslateEnabled(true);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -832,6 +907,7 @@ export default function App() {
     setBlocks(newBlocks);
     setMeta(newMeta);
     setBookmarks([]);
+    setAutoTranslateEnabled(true);
 
     // 3. Add to bookshelf so new stories are immediately remembered
     const newShelfStory: BookshelfStory = {
@@ -926,29 +1002,6 @@ export default function App() {
   const currentStoryStats = useMemo(() => {
     return calculateStoryStats(blocks, meta.ao3Meta?.stats?.words);
   }, [blocks, meta.ao3Meta?.stats?.words]);
-
-  // Virtual Progressive Windowing for huge documents (prevents browser freezing on 10,000+ paragraphs)
-  const isLargeStory = blocks.length > 80;
-  const BUFFER_BEFORE = 35;
-  const BUFFER_AFTER = 55;
-
-  const visibleRange = useMemo(() => {
-    if (!isLargeStory) {
-      return { start: 0, end: blocks.length };
-    }
-    const center = Math.max(0, currentReadBlock - 1);
-    const start = Math.max(0, center - BUFFER_BEFORE);
-    const end = Math.min(blocks.length, center + BUFFER_AFTER);
-    return { start, end };
-  }, [isLargeStory, blocks.length, currentReadBlock]);
-
-  const visibleBlocks = useMemo(() => {
-    if (!isLargeStory) return blocks;
-    return blocks.slice(visibleRange.start, visibleRange.end);
-  }, [isLargeStory, blocks, visibleRange.start, visibleRange.end]);
-
-  const topSpacerHeight = isLargeStory ? visibleRange.start * 96 : 0;
-  const bottomSpacerHeight = isLargeStory ? (blocks.length - visibleRange.end) * 96 : 0;
 
   return (
     <div
@@ -1059,7 +1112,7 @@ export default function App() {
               title="自动伴读翻译：阅读或滚动时，系统在后台自动顺延翻译后续段落"
             >
               <Zap className={`h-3.5 w-3.5 ${autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'}`} />
-              <span>伴读自动翻译: {autoTranslateEnabled ? '开启中' : '已暂停'}</span>
+              <span>随滚随译: {autoTranslateEnabled ? '开启中' : '已暂停'}</span>
             </button>
 
             {/* Bookmarks Quick Trigger */}
@@ -1183,11 +1236,11 @@ export default function App() {
                 {translatedCount < blocks.length ? (
                   autoTranslateEnabled ? (
                     <span className="ml-1 text-emerald-800 dark:text-emerald-300 font-semibold">
-                      · 正在后台智能伴读自动翻译下文（已译 {translatedCount}/{blocks.length} 段）
+                      · 已开启随滚随译，滚动到哪即自动实时翻译（已译 {translatedCount}/{blocks.length} 段）
                     </span>
                   ) : (
                     <span className="ml-1 text-amber-800 dark:text-amber-300">
-                      · 伴读自动翻译已暂停（已译 {translatedCount}/{blocks.length} 段）
+                      · 随滚随译已暂停（已译 {translatedCount}/{blocks.length} 段）
                     </span>
                   )
                 ) : (
@@ -1203,7 +1256,7 @@ export default function App() {
                   onClick={toggleAutoTranslate}
                   className="px-2 py-1 rounded-md bg-white dark:bg-zinc-800 border border-amber-300 dark:border-amber-700 font-bold text-amber-900 dark:text-amber-200 hover:bg-amber-100 transition shadow-2xs"
                 >
-                  {autoTranslateEnabled ? '暂停自动伴读' : '开启自动伴读'}
+                  {autoTranslateEnabled ? '暂停随滚随译' : '开启随滚随译'}
                 </button>
               )}
               {translatedCount < blocks.length && (
@@ -1362,7 +1415,7 @@ export default function App() {
               autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'
             }`}
           />
-          <span>{autoTranslateEnabled ? '伴读开' : '伴读停'}</span>
+          <span>{autoTranslateEnabled ? '随译开' : '随译停'}</span>
         </button>
 
         {/* Style */}

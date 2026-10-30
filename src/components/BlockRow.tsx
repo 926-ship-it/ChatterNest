@@ -157,6 +157,7 @@ export const BlockRow = React.memo<BlockRowProps>(({
   return (
     <div
       id={`block-${block.id}`}
+      data-block-id={block.id}
       data-block-index={index}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => {
@@ -355,18 +356,23 @@ export const BlockRow = React.memo<BlockRowProps>(({
                 }}
               >
                 {isLi && <span className="mr-1.5 opacity-60">•</span>}
-                {block.targetText || (block.isTranslating ? (
-                  <span className="text-[#990000] inline-flex items-center gap-1 text-xs animate-pulse">
-                    <RefreshCw className="h-3 w-3 animate-spin" /> 正在智能伴读翻译中...
-                  </span>
-                ) : autoTranslateEnabled ? (
-                  <span className="text-amber-700 dark:text-amber-400 text-xs not-italic inline-flex items-center gap-1">
-                    <Sparkles className="h-3 w-3 text-amber-500" />
-                    <span>伴读排队中... (点击优先翻译)</span>
+                {block.targetText ? (
+                  block.targetText
+                ) : block.isTranslating ? (
+                  <span className="text-[#990000] inline-flex items-center gap-1.5 text-xs animate-pulse">
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    <span>正在翻译...</span>
                   </span>
                 ) : (
-                  '点击即可翻译此段落'
-                ))}
+                  <span
+                    onClick={() => onTranslateSingle(block)}
+                    className="text-amber-700/90 dark:text-amber-400/90 text-xs inline-flex items-center gap-1.5 cursor-pointer hover:text-[#990000] transition"
+                    title="滚动到此处将自动翻译，也可点击即刻重译"
+                  >
+                    <RefreshCw className="h-3 w-3 animate-spin text-amber-500" />
+                    <span>滚动到此，随译中...</span>
+                  </span>
+                )}
               </div>
             )}
 
@@ -414,26 +420,23 @@ export const BlockRow = React.memo<BlockRowProps>(({
               }}
             >
               {isLi && <span className="mr-1">•</span>}
-              {block.targetText || (block.isTranslating ? (
-                <span className="text-[#990000] inline-flex items-center gap-1 text-xs animate-pulse font-normal">
-                  <RefreshCw className="h-3 w-3 animate-spin" /> 正在智能伴读翻译中...
-                </span>
-              ) : autoTranslateEnabled ? (
-                <span
-                  onClick={() => onTranslateSingle(block)}
-                  className="text-amber-700 dark:text-amber-400 text-xs not-italic cursor-pointer hover:underline inline-flex items-center gap-1"
-                >
-                  <Sparkles className="h-3 w-3 text-amber-500" />
-                  <span>伴读排队中... (点击优先翻译)</span>
+              {block.targetText ? (
+                block.targetText
+              ) : block.isTranslating ? (
+                <span className="text-[#990000] inline-flex items-center gap-1.5 text-xs animate-pulse font-normal">
+                  <RefreshCw className="h-3 w-3 animate-spin" />
+                  <span>正在翻译...</span>
                 </span>
               ) : (
                 <span
                   onClick={() => onTranslateSingle(block)}
-                  className="text-zinc-400 text-xs italic cursor-pointer hover:underline"
+                  className="text-amber-700/90 dark:text-amber-400/90 text-xs inline-flex items-center gap-1.5 cursor-pointer hover:text-[#990000] transition font-normal"
+                  title="滚动到此处将自动翻译，也可点击即刻重译"
                 >
-                  （尚未翻译，点击此处立即翻译）
+                  <RefreshCw className="h-3 w-3 animate-spin text-amber-500" />
+                  <span>滚动到此，随译中...</span>
                 </span>
-              ))}
+              )}
             </div>
 
             {/* Quick mini toolbar */}
@@ -532,27 +535,19 @@ export const BlockRow = React.memo<BlockRowProps>(({
                 </button>
               </span>
             </span>
-          ) : block.isTranslating ? (
-            <span className="inline-flex items-center gap-1.5 text-xs text-[#990000] dark:text-red-400 py-1 px-3 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 animate-pulse font-medium">
-              <RefreshCw className="h-3 w-3 animate-spin" />
-              <span>正在智能伴读翻译本段...</span>
-            </span>
-          ) : autoTranslateEnabled ? (
-            <span
-              onClick={() => onTranslateSingle(block)}
-              className="text-xs text-amber-800 dark:text-amber-300 bg-amber-50/90 dark:bg-amber-950/50 px-3 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800/60 cursor-pointer hover:bg-amber-100 dark:hover:bg-amber-900/50 transition inline-flex items-center gap-1.5 shadow-2xs group"
-              title="伴读流正在自动翻译中，也可点击立即优先翻译此段"
-            >
-              <Sparkles className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
-              <span>伴读流排队中，即将自动译出</span>
-              <span className="text-[11px] underline opacity-75 group-hover:opacity-100 font-semibold">（点击优先翻译）</span>
-            </span>
           ) : (
             <span
               onClick={() => onTranslateSingle(block)}
-              className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/40 px-2.5 py-1 rounded-md border border-amber-200 dark:border-amber-900 cursor-pointer hover:bg-amber-100 dark:hover:bg-amber-900/50 transition inline-flex items-center gap-1"
+              className="relative cursor-pointer group/trans"
+              title="滚动到此处将自动翻译，也可点击即刻优先翻译"
             >
-              <span>（本段尚未翻译，点击此处立即翻译）</span>
+              <span className="text-zinc-500 dark:text-zinc-400 opacity-85 select-text">
+                {block.sourceText}
+              </span>
+              <span className="inline-flex items-center gap-1 ml-2 text-[11px] font-sans text-amber-800 dark:text-amber-300 bg-amber-50/90 dark:bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-200/80 dark:border-amber-800/60 shadow-2xs">
+                <RefreshCw className={`h-2.5 w-2.5 ${block.isTranslating ? 'animate-spin text-[#990000]' : 'animate-spin text-amber-600'}`} />
+                <span>{block.isTranslating ? '正在翻译...' : '滚动随译中'}</span>
+              </span>
             </span>
           )}
         </div>

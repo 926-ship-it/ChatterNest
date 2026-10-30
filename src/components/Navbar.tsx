@@ -270,7 +270,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'
                   }`}
                 />
-                <span>伴读流: {autoTranslateEnabled ? '开启' : '暂停'}</span>
+                <span>随滚随译: {autoTranslateEnabled ? '开启' : '暂停'}</span>
               </button>
             )}
 
