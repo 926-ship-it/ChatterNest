@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --font-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", SimSun, STSong, Georgia, serif;
+    --font-kaiti: "Kaiti SC", STKaiti, "KaiTi", "Noto Serif SC", serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+}
+
+.font-reading-sans {
+  font-family: var(--font-sans);
+}
+
+.font-reading-serif {
+  font-family: var(--font-serif);
+}
+
+.font-reading-kaiti {
+  font-family: var(--font-kaiti);
+}
+
+.font-reading-mono {
+  font-family: var(--font-mono);
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.4);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.6);
+}
+
+/* Print Stylesheet for Vector PDF Generation */
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 1.5cm;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #111827 !important;
+    font-size: 11pt !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+  }
+
+  .print-bilingual-row {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    margin-bottom: 12pt !important;
+  }
+}

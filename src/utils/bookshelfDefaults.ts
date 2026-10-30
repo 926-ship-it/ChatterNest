@@ -1,0 +1,129 @@
+import { BookshelfStory, DocumentBlock } from '../types/document';
+import { SAMPLE_DOCUMENTS } from '../data/presets';
+import { parseHTMLToBlocks, parseAO3Document } from './importer';
+
+export const BOOKSHELF_STORAGE_KEY = 'chatternest_bookshelf_v2';
+
+const SAMPLE_TRANSLATIONS: [RegExp, string][] = [
+  // 1. The Nightingale and the Rose
+  [/The Nightingale and the Rose/i, '夜莺与玫瑰 (The Nightingale and the Rose)'],
+  [/by Oscar Wilde/i, '原作者：奥斯卡·王尔德 (1888 · 公版经典)'],
+  [/Chapter 1: The Rose of Desire/i, '第一章：愿望中的红玫瑰'],
+  [/She said that she would dance with me if I brought her red roses/i, '“她说，只要我带给她一朵红玫瑰，她便愿与我共舞，”年轻的学生悲呼道，“可是在我的整座花园里，竟然连一朵红玫瑰也寻不见。”'],
+  [/From her nest in the holm-oak tree/i, '冬青栎树巢中的夜莺听见了他的哀叹，她探身透过枝叶凝望，心中满是惊奇。'],
+  [/No red rose in all my garden/i, '“我整座花园里竟然没有一朵红玫瑰！”他痛声哭诉，美丽的双眸盈满了泪水。“唉，幸福所系之物竟是如此微小！我读遍了先贤智者写下的鸿篇巨制，洞悉了世间哲学的奥秘真理，然而仅仅为了一朵小小的红玫瑰，我的一生便陷入这般凄凉绝望。”'],
+  [/Here at last is a true lover/i, '“世间终于有了一位真正懂爱的人，”夜莺感叹道，“无数个夜晚，我虽未曾谋面，却一直在为他吟唱；无数个夜晚，我向星辰倾诉他的故事；如今，我终于亲眼见到了他。他的青丝黑如风信子花瓣，他的嘴唇红如他渴望的那朵玫瑰；然而狂热的情思已令他的面容宛如苍白的象牙，悲伤亦在他眉间烙下了深深的印记。”'],
+  [/The Prince gives a ball to-morrow night/i, '“明晚王子将举办一场盛大舞会，”年轻的学生喃喃自语，“我心爱的人也将应邀出席。如果我能奉上一朵红玫瑰，她便会伴我翩翩起舞直到拂晓。如果我能奉上一朵红玫瑰，我就能将她拥入怀中，她会把臻首依偎在我的肩头，纤手与我十指相扣。可是我的园中没有红玫瑰，所以我只能孤零零地坐在一隅，任凭她从我身旁悄然掠过。她连一眼都不会看我，我的心也将碎成齑粉。”'],
+  [/Here indeed is the true lover/i, '“这的确是一位真正的痴情之人，”夜莺轻叹道，“我所歌唱的，正是他所饱受的折磨；对我而言是欢愉之歌，于他却是椎心之痛。爱当真是世间最神奇莫测的造物。它比祖母绿更加珍贵，比晶莹的欧泊更显娇贵。珍珠与石榴换不来它，市集之上亦难觅其踪。它不可在商贾手中采买，亦无法在天平上用黄金称量。”'],
+  [/The musicians will sit in their gallery/i, '“乐师们将端坐于挑台上，”年轻的学生低语道，“奏响手中的弦乐，我心爱的人将随着竖琴与小提琴的旋律翩跹起舞。她的舞步轻盈得仿佛双足未曾沾染尘埃，身着华服的廷臣侍卫们都会簇拥在她身旁。然而她却不会与我共舞，因为我没有红玫瑰可以赠她。”'],
+  [/He flung himself down on the grass/i, '他猛地扑倒在草丛中，双手掩面，失声痛哭起来。'],
+  [/Why is he weeping/i, '“他究竟在哭什么呀？”一只小巧的绿蜥蜴竖着尾巴从他身旁飞快掠过时好奇地问道。'],
+  [/fluttering after a sunbeam/i, '“是啊，究竟因何而哭呢？”一只追逐着阳光翩翩起舞的蝴蝶也附和道。'],
+  [/whispered a Daisy to his neighbour/i, '“到底为了什么呢？”一朵雏菊用轻柔温婉的低语问向身旁的伙伴。'],
+  [/He is weeping for a red rose/i, '“他正在为了一朵红玫瑰而痛哭，”夜莺答道。'],
+  [/how very ridiculous/i, '“为了一朵红玫瑰！”他们异口同声地惊呼，“真是太荒唐可笑了！”小蜥蜴甚至忍不住径直大笑出声。'],
+  [/mystery of Love/i, '然而唯独夜莺懂得这位青年学者悲伤深处的秘密；她静静地栖息在栎树枝头，沉浸在关于爱的玄妙谜题之中。'],
+
+  // 2. The Happy Prince
+  [/The Happy Prince/i, '快乐王子 (The Happy Prince)'],
+  [/by Oscar Wilde \(1888/i, '原作者：奥斯卡·王尔德 (1888 · 公版经典)'],
+  [/Chapter 1: The Statue and the Swallow/i, '第一章：雕像与小燕子'],
+  [/High above the city, on a tall column/i, '高高耸立在城市之巅的圆柱顶端，挺立着快乐王子的雕像。他通体贴满了纯金箔片，双眸镶嵌着两颗璀璨夺目的蓝宝石，佩剑的剑柄上还闪耀着一颗硕大如火的红宝石。'],
+  [/He was very much admired indeed/i, '人们对他赞不绝口。“他美得就宛如一只风向标，”一位急于博得艺术鉴赏家美名的镇议员评论道，“只是没有风向标那么实用，”他连忙补充道，唯恐旁人认为他是个不讲实际的人。'],
+  [/One night there flew over the city a little Swallow/i, '某天夜晚，一只小燕子孤身掠过这座城市。他的同伴早在六周前便飞往了温暖的埃及，唯独他留了下来，因为他爱上了芦苇河畔最美丽的一株芦苇。那是初春时节，当他正追逐一只硕大的黄飞蛾掠过水面时，与她一见钟情。'],
+  [/Shall I love you/i, '“我能爱你吗？”向来直截了当的燕子问道，芦苇轻轻向他弯腰致意。于是他绕着她飞舞，双翼轻拂水面，荡开层层银白色的涟漪。这是他对她长达一整个夏天的求爱。'],
+  [/It is a ridiculous attachment/i, '“这段爱恋真是荒谬透顶，”其他燕子叽叽喳喳地嘲笑道，“她既无分文积蓄，亲眷又多得数不清。”确实，整条河里长满了芦苇。待到深秋来临，群燕便纷纷振翅远飞了。'],
+  [/All day long he flew/i, '他飞了一整天，直到夜幕降临才飞抵这座城市。“今晚我该落脚在何处呢？”他自言自语道，“但愿这座市镇已经为我备好了住所。”'],
+  [/I will put up there/i, '这时他看见了高柱上的雕像。“我就落在那里歇息吧，”他欢呼道，“那里视野极佳，而且空气新鲜清新。”于是他轻盈地降落在快乐王子的双足之间。'],
+  [/I have a golden bedroom/i, '“我拥有一间黄金卧室，”他环顾四周，心中轻声呢喃，随即便准备将头埋进翅膀沉沉睡去；可就在此时，一大滴水珠啪嗒落在了他的头上。'],
+  [/What a curious thing/i, '“真是怪事！”燕子惊诧地叫道，“夜空晴朗无云，繁星璀璨明亮，怎会平白无故下起雨来？”'],
+  [/Then another drop fell/i, '紧接着，又有一滴水珠落了下来。'],
+  [/What is the use of a statue/i, '“如果一座雕像连遮风避雨都做不到，那它还有何用处？”燕子懊恼道，“我必须去找个好烟囱避雨，”说着他便决意振翅飞走。'],
+  [/before he had opened his wings/i, '然而，还未等他张开双翼，第三滴水珠又落了下来。他抬头望去——啊！他看见了什么？'],
+  [/The eyes of the Happy Prince were filled with tears/i, '快乐王子的眼中盈满了泪水，晶莹的泪珠正顺着他金色的双颊不断滑落。在清冷的月光下，他的面庞是如此圣洁美丽，令小燕子的心头瞬间涌起无尽的怜惜。'],
+  [/Who are you/i, '“你是谁？”燕子轻声问道。'],
+  [/Why are you weeping then/i, '“那你为何要哭泣呢？”燕子问道，“你的泪水把我的羽毛都浸湿透了。”'],
+
+  // 3. The Gift of the Magi
+  [/The Gift of the Magi/i, '麦琪的礼物 (The Gift of the Magi)'],
+  [/by O\. Henry \(1905/i, '原作者：欧·亨利 (1905 · 公版经典)'],
+  [/Chapter 1: Pennies and Pride/i, '第一章：硬币与引以为傲之物'],
+  [/One dollar and eighty-seven cents/i, '一美元八十七美分。全部家当只有这么多了。其中六十美分还是面值一分钱的硬币。这些硬币是一分一分地从杂货铺老板、菜贩和屠户手里死磨硬泡省下来的，每一次算计都让脸颊因那种无言的吝啬指责而火辣辣地发烫。'],
+  [/Three times Della counted it/i, '德拉反反复复数了三遍。一美元八十七美分。而明天，就是一年一度的圣诞节了。'],
+  [/flop down on the shabby little couch/i, '此时此刻，除了扑倒在那张破旧的小沙发上号啕大哭之外，显然别无他法。于是德拉便痛哭了一场。这一举动不禁令人感叹：生活大体就是由抽泣、擤鼻涕和破涕为笑交织而成的，其中尤以擤鼻涕占据了大部分光阴。'],
+  [/furnished flat at eight dollars a week/i, '趁着这位家中的女主人正由号啕大哭逐渐转入抽泣之际，不妨看一眼这个家。这是一套每周租金八美元的带家具公寓。虽不至于寒酸到无可名状，但确实也足以引起流浪汉管制稽查队的警惕注意。'],
+  [/two possessions of the James Dillingham Youngs/i, '在这个詹姆斯·迪林厄姆·杨的小家庭里，有两样东西让他们夫妇二人深感无比骄傲与自豪。一样是吉姆的金表，那是他祖父传给父亲，又由父亲传给他的传家宝；另一样，便是德拉那一头美丽的秀发。'],
+  [/Had the Queen of Sheba lived/i, '倘若示巴女王就住在天井对面的公寓里，德拉总有一天会把长发悬垂在窗外晾晒，好教女王陛下的珠宝与贡品顿时黯然失色；倘若所罗门王屈尊做了大楼看门人，将所有财宝堆在地下室里，吉姆每次经过时也定会掏出金表瞥上一眼，只为看他嫉妒得直吹胡子。'],
+  [/Della's beautiful hair fell about her/i, '此时此刻，德拉那瀑布般美丽的秀发披散在肩头，宛如一泓褐色的清泉波光粼粼、流光溢彩。长发一直垂过了她的膝弯，简直如同一件用发丝织就的华丽长袍。'],
+  [/faltered for a minute/i, '随后，她神色紧张而利落地下手将头发重新挽起。中途她恍惚停顿了片刻，静静伫立在那里，一两滴泪珠无声地落在了破旧的红色地毯上。'],
+];
+
+export function buildStoryFromPreset(preset: typeof SAMPLE_DOCUMENTS[0]): BookshelfStory {
+  const parsed = parseAO3Document(preset.htmlContent);
+  const blocks: DocumentBlock[] = parsed.blocks.map((b) => {
+    let target = b.targetText || '';
+    for (const [regex, zh] of SAMPLE_TRANSLATIONS) {
+      if (regex.test(b.sourceText)) {
+        target = zh;
+        break;
+      }
+    }
+    return {
+      ...b,
+      targetText: target,
+    };
+  });
+
+  const translatedBlocks = blocks.filter(
+    (b) => b.targetText && b.targetText.trim() && b.targetText !== b.sourceText
+  ).length;
+
+  return {
+    id: preset.id,
+    title: preset.title,
+    fileName: `${preset.id}.html`,
+    fileType: 'html',
+    author: preset.ao3Meta?.author,
+    fandoms: preset.ao3Meta?.fandoms,
+    coverColor: '#990000',
+    totalBlocks: blocks.length,
+    translatedBlocks,
+    estimatedWords: preset.ao3Meta?.stats?.words || blocks.reduce((acc, b) => acc + b.sourceText.split(' ').length, 0),
+    updatedAt: Date.now(),
+    createdAt: Date.now() - 86400000,
+    blocks,
+    bookmarks: [],
+    ao3Meta: preset.ao3Meta,
+    sourceLang: preset.sourceLang,
+    targetLang: preset.targetLang,
+  };
+}
+
+export function getInitialBookshelfStories(): BookshelfStory[] {
+  return SAMPLE_DOCUMENTS.map((preset) => buildStoryFromPreset(preset));
+}
+
+export function loadBookshelfFromStorage(): BookshelfStory[] {
+  try {
+    const raw = localStorage.getItem(BOOKSHELF_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to read bookshelf from localStorage', e);
+  }
+  const initial = getInitialBookshelfStories();
+  saveBookshelfToStorage(initial);
+  return initial;
+}
+
+export function saveBookshelfToStorage(shelf: BookshelfStory[]): void {
+  try {
+    localStorage.setItem(BOOKSHELF_STORAGE_KEY, JSON.stringify(shelf));
+  } catch (e) {
+    console.error('Failed to save bookshelf to localStorage', e);
+  }
+}
