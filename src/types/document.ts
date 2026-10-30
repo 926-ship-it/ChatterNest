@@ -40,7 +40,7 @@ export interface DocumentMeta {
   id: string;
   title: string;
   fileName: string;
-  fileType: 'pdf' | 'html' | 'text' | 'ao3';
+  fileType: 'pdf' | 'html' | 'text' | 'ao3' | 'epub' | 'txt' | 'md';
   sourceLang: string;
   targetLang: string;
   createdAt: number;
@@ -116,7 +116,7 @@ export interface BookshelfStory {
   id: string;
   title: string;
   fileName: string;
-  fileType: 'pdf' | 'html' | 'text' | 'ao3';
+  fileType: 'pdf' | 'html' | 'text' | 'ao3' | 'epub' | 'txt' | 'md';
   author?: string;
   fandoms?: string[];
   coverColor?: string;

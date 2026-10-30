@@ -18,6 +18,8 @@ import {
   parsePDFToBlocks,
   parsePlainTextToBlocks,
   parseAO3Document,
+  parseEPUBToBlocks,
+  parseTxtStoryFile,
 } from '../utils/importer';
 
 interface ImportModalProps {
@@ -46,9 +48,25 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       let blocks: DocumentBlock[] = [];
       let parsedMeta: Partial<DocumentMeta> = {};
       const extension = file.name.split('.').pop()?.toLowerCase();
+      const rawName = file.name.replace(/\.[^/.]+$/, '');
 
-      if (extension === 'pdf') {
+      if (extension === 'epub') {
+        const epubData = await parseEPUBToBlocks(file);
+        blocks = epubData.blocks;
+        parsedMeta = epubData.meta;
+      } else if (extension === 'txt' || extension === 'text') {
+        const text = await file.text();
+        const txtData = parseTxtStoryFile(text, rawName);
+        blocks = txtData.blocks;
+        parsedMeta = txtData.meta;
+      } else if (extension === 'md' || extension === 'markdown') {
+        const text = await file.text();
+        const txtData = parseTxtStoryFile(text, rawName);
+        blocks = txtData.blocks;
+        parsedMeta = { ...txtData.meta, fileType: 'md' };
+      } else if (extension === 'pdf') {
         blocks = await parsePDFToBlocks(file);
+        parsedMeta = { fileType: 'pdf' };
       } else if (extension === 'html' || extension === 'htm') {
         const text = await file.text();
         if (text.includes('workskin') || text.includes('userstuff') || text.includes('byline')) {
@@ -57,17 +75,21 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           parsedMeta = ao3Data.meta;
         } else {
           blocks = parseHTMLToBlocks(text);
+          parsedMeta = { fileType: 'html' };
         }
       } else {
-        const text = await file.text();
-        blocks = parsePlainTextToBlocks(text);
+        // Fallback for any other common text files (.srt, .vtt, .json, .csv, etc.)
+        const text = await file.text().catch(() => '');
+        const txtData = parseTxtStoryFile(text, rawName);
+        blocks = txtData.blocks;
+        parsedMeta = txtData.meta;
       }
 
       const meta: DocumentMeta = {
         id: `doc-${Date.now()}`,
-        title: parsedMeta.title || file.name.replace(/\.[^/.]+$/, ''),
+        title: parsedMeta.title || rawName,
         fileName: file.name,
-        fileType: (parsedMeta.fileType || (extension === 'pdf' ? 'pdf' : 'html')) as any,
+        fileType: (parsedMeta.fileType || (extension === 'epub' ? 'epub' : extension === 'txt' ? 'txt' : extension === 'pdf' ? 'pdf' : 'html')) as any,
         sourceLang: 'English',
         targetLang: 'Chinese (Simplified)',
         createdAt: Date.now(),
@@ -77,9 +99,9 @@ export const ImportModal: React.FC<ImportModalProps> = ({
 
       onImportDocument(blocks, meta);
       onClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('File parsing error:', err);
-      alert('解析文件遇到异常，请检查文件格式是否有效。');
+      alert(`解析文件遇到异常: ${err?.message || '请检查文件格式是否有效'}`);
     } finally {
       setIsProcessing(false);
     }
@@ -188,14 +210,16 @@ export const ImportModal: React.FC<ImportModalProps> = ({
         blocks = parseHTMLToBlocks(pasteContent);
       }
     } else {
-      blocks = parsePlainTextToBlocks(pasteContent);
+      const txtData = parseTxtStoryFile(pasteContent, pasteTitle.trim() || '粘贴导入故事');
+      blocks = txtData.blocks;
+      metaResult = txtData.meta;
     }
 
     const meta: DocumentMeta = {
       id: `pasted-${Date.now()}`,
       title: pasteTitle.trim() || metaResult?.title || '导入的故事文档',
-      fileName: 'imported_story.html',
-      fileType: 'html',
+      fileName: isHtml ? 'imported_story.html' : 'imported_story.txt',
+      fileType: isHtml ? 'html' : 'txt',
       sourceLang: 'English',
       targetLang: 'Chinese (Simplified)',
       createdAt: Date.now(),
@@ -260,7 +284,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
             }`}
           >
             <Upload className="h-4 w-4" />
-            上传 HTML / PDF 文件
+            上传文件 (EPUB / TXT / HTML / PDF)
           </button>
           <button
             onClick={() => setActiveTab('paste')}
@@ -340,7 +364,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".html,.htm,.pdf,.txt"
+                accept=".epub,.txt,.text,.md,.markdown,.html,.htm,.pdf"
                 onChange={(e) => {
                   if (e.target.files && e.target.files[0]) {
                     handleProcessFile(e.target.files[0]);
@@ -357,7 +381,7 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                 onDragLeave={() => setDragActive(false)}
                 onDrop={handleDrop}
                 onClick={() => fileInputRef.current?.click()}
-                className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-3 ${
+                className={`border-2 border-dashed rounded-2xl p-7 text-center cursor-pointer transition-all flex flex-col items-center justify-center gap-3 ${
                   dragActive
                     ? 'border-[#990000] bg-red-50 dark:bg-red-950/20'
                     : 'border-zinc-300 dark:border-zinc-700 hover:border-[#990000] bg-zinc-50/50 dark:bg-zinc-800/30'
@@ -368,16 +392,30 @@ export const ImportModal: React.FC<ImportModalProps> = ({
                 </div>
                 <div>
                   <div className="font-bold text-sm text-zinc-900 dark:text-zinc-100">
-                    点击选择文件，或将本地 HTML / PDF 故事拖入此处
+                    点击选择文件，或将本地 EPUB / TXT / HTML / PDF 故事拖入此处
                   </div>
                   <div className="text-xs text-zinc-500 mt-1">
-                    支持网页导出的整本 HTML 文档、小说电子书或英文 PDF 排版
+                    支持 EPUB 电子书、TXT 纯文本小说、整本 HTML、PDF 文档与 Markdown (.md)
                   </div>
                 </div>
-                <div className="flex gap-2 text-[11px] text-zinc-400">
-                  <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">提取故事元信息</span>
-                  <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">章节结构对齐</span>
-                  <span className="px-2 py-0.5 rounded bg-zinc-100 dark:bg-zinc-800">原格式无损保留</span>
+
+                {/* Supported Format Badges */}
+                <div className="flex flex-wrap justify-center gap-1.5 text-[11px] font-medium pt-1">
+                  <span className="px-2 py-0.5 rounded-md bg-purple-100 dark:bg-purple-950/60 text-purple-800 dark:text-purple-300 border border-purple-200 dark:border-purple-800">
+                    📚 EPUB 电子书
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-blue-100 dark:bg-blue-950/60 text-blue-800 dark:text-blue-300 border border-blue-200 dark:border-blue-800">
+                    📄 TXT 纯文本小说
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
+                    🌐 HTML 网页导出
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-rose-100 dark:bg-rose-950/60 text-rose-800 dark:text-rose-300 border border-rose-200 dark:border-rose-800">
+                    📑 PDF 格式
+                  </span>
+                  <span className="px-2 py-0.5 rounded-md bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+                    📝 Markdown (.md)
+                  </span>
                 </div>
               </div>
 
