@@ -85,6 +85,15 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
 
   // Test the current configuration via backend proxy
   const handleTestConnection = async () => {
+    // If the provider requires an API Key but user has not typed one yet
+    if (currentPreset.requiresKey && !apiKey.trim()) {
+      setTestResult({
+        success: false,
+        error: `您当前选择了【${currentPreset.name}】，该服务商需要先填入 API Key 才能调用。请在下方输入框填入您的密钥；若暂无密钥，请切换至【免Key免费公共翻译】或【系统默认】即可直接使用。`,
+      });
+      return;
+    }
+
     setIsTesting(true);
     setTestResult(null);
 
@@ -107,8 +116,13 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
       });
 
       const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || '连接测试未成功');
+      if (!data.success) {
+        setTestResult({
+          success: false,
+          error: data.error || '连接测试未成功，请检查 API 接口地址或 Key 是否有效。',
+          latencyMs: data.latencyMs,
+        });
+        return;
       }
 
       setTestResult({
@@ -120,7 +134,7 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
     } catch (err: any) {
       setTestResult({
         success: false,
-        error: err.message || '测试失败，请检查 API 接口地址或 Key 是否有效。',
+        error: err.message || '网络或接口通信异常，请重试。',
       });
     } finally {
       setIsTesting(false);
@@ -486,9 +500,27 @@ export const ApiSettingsModal: React.FC<ApiSettingsModalProps> = ({
                   </div>
                 )}
                 {testResult.error && (
-                  <p className="mt-1 text-[11px] leading-relaxed text-red-700 dark:text-red-300">
-                    {testResult.error}
-                  </p>
+                  <div className="mt-1.5 space-y-2">
+                    <p className="text-[11px] leading-relaxed text-red-700 dark:text-red-300">
+                      {testResult.error}
+                    </p>
+                    <div className="flex items-center gap-2 pt-1.5 border-t border-red-200/60 dark:border-red-900/40 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => handleSelectProvider('mymemory_free')}
+                        className="px-2.5 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold shadow-2xs transition"
+                      >
+                        一键切换为免Key免费翻译 (零门槛)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleResetToDefault}
+                        className="px-2.5 py-1 rounded-md bg-zinc-200 dark:bg-zinc-700 hover:bg-zinc-300 text-zinc-800 dark:text-zinc-200 text-[11px] transition"
+                      >
+                        恢复默认 Gemini
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
             )}

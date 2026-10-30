@@ -205,12 +205,21 @@ async function callOpenAICompatible(params: {
 
   if (!response.ok) {
     const errorText = await response.text();
-    let msg = `API 请求失败 (HTTP ${response.status})`;
+    let detail = '';
     try {
       const errJson = JSON.parse(errorText);
-      msg = errJson.error?.message || errJson.message || msg;
+      detail = errJson.error?.message || errJson.message || errorText;
     } catch {
-      msg = `${msg}: ${errorText.slice(0, 160)}`;
+      detail = errorText.slice(0, 160);
+    }
+
+    let msg = `API 请求失败 (HTTP ${response.status}): ${detail}`;
+    if (response.status === 401) {
+      msg = `API Key 鉴权失败 (HTTP 401): 密钥无效、未授权或未填写。请核对您填写的 API Key 是否正确复制。(${detail})`;
+    } else if (response.status === 429) {
+      msg = `API 配额用尽或触发频率限制 (HTTP 429): 账户额度不足或并发过高。(${detail})`;
+    } else if (response.status === 404) {
+      msg = `接口地址或模型未找到 (HTTP 404): 请检查 Base URL 或所选模型名称是否正确。(${detail})`;
     }
     throw new Error(msg);
   }
@@ -617,8 +626,21 @@ app.post('/api/test-api', async (req, res) => {
       provider === 'moonshot' ||
       provider === 'custom_openai'
     ) {
-      if (!apiConfig.endpoint) {
-        return res.status(400).json({ error: '请提供有效的 API Base URL 地址' });
+      if (!apiConfig.endpoint || !apiConfig.endpoint.trim()) {
+        return res.json({
+          success: false,
+          error: '请提供有效的 API Base URL 地址',
+          latencyMs: Date.now() - startTime,
+        });
+      }
+
+      // Check if API Key is empty for providers that require authentication
+      if (provider !== 'custom_openai' && (!apiConfig.apiKey || !apiConfig.apiKey.trim())) {
+        return res.json({
+          success: false,
+          error: `当前选择的【${provider}】需要填写 API Key 才能调用。请在下方输入框粘贴您的 Key 后再测试，或选择「免Key免费公共翻译」。`,
+          latencyMs: Date.now() - startTime,
+        });
       }
 
       const systemInstruction = `Translate the English sentence accurately and naturally into ${targetLang}. Output ONLY the direct translated sentence with no explanations.`;
@@ -644,11 +666,21 @@ app.post('/api/test-api', async (req, res) => {
 
     // Test Gemini Custom Key or Default
     const customKey = provider === 'gemini_custom' ? apiConfig.apiKey : undefined;
+    if (provider === 'gemini_custom' && (!customKey || !customKey.trim())) {
+      return res.json({
+        success: false,
+        error: '未检测到个人 Gemini API Key，请在下方输入框填入您的 Key 后再测试，或直接选择「系统内置 Gemini」。',
+        latencyMs: Date.now() - startTime,
+      });
+    }
+
     const ai = getGenAI(customKey);
 
     if (!ai) {
-      return res.status(400).json({
-        error: '未检测到有效的 Gemini API Key，请在输入框填入您的个人 Key。',
+      return res.json({
+        success: false,
+        error: '未检测到有效的 Gemini API Key，请选择「免Key免费公共翻译」或填入您的个人 Key。',
+        latencyMs: Date.now() - startTime,
       });
     }
 
@@ -666,10 +698,10 @@ app.post('/api/test-api', async (req, res) => {
       message: 'Google Gemini 接口通信正常！',
     });
   } catch (err: any) {
-    console.error('Test API error:', err);
-    res.status(500).json({
+    console.warn('[API Test Notice]:', err?.message || err);
+    res.json({
       success: false,
-      error: err.message || 'API 测试失败，请检查网络或 Key 是否有效。',
+      error: err.message || 'API 测试未成功，请检查 API Key 是否有效或网络是否畅通。',
       latencyMs: Date.now() - startTime,
     });
   }
