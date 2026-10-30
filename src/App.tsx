@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   DocumentBlock,
   DocumentMeta,
@@ -54,6 +54,7 @@ import {
   BookOpen,
   Library,
   Clock,
+  Zap,
 } from 'lucide-react';
 
 
@@ -138,6 +139,28 @@ export default function App() {
   // 7. Execution State
   const [isTranslating, setIsTranslating] = useState(false);
   const [isBatchPolishing, setIsBatchPolishing] = useState(false);
+
+  // 8. Auto-Translate Stream State (伴读流式自动翻译)
+  const [autoTranslateEnabled, setAutoTranslateEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('chatternest_auto_translate');
+      return saved !== null ? saved === 'true' : true; // Default ON so reading is continuous
+    } catch (e) {
+      return true;
+    }
+  });
+  const [autoTranslateNotice, setAutoTranslateNotice] = useState<string | null>(null);
+  const isAutoLoopRunningRef = useRef(false);
+
+  const toggleAutoTranslate = () => {
+    setAutoTranslateEnabled((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('chatternest_auto_translate', String(next));
+      } catch (e) {}
+      return next;
+    });
+  };
 
   // Initialize workspace from the first story in bookshelf on mount
   useEffect(() => {
@@ -244,6 +267,51 @@ export default function App() {
     return directive;
   };
 
+  // Safe helper to invoke /api/translate with text extraction and resilience
+  const callApiTranslate = async (payload: any) => {
+    try {
+      const res = await fetch('/api/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const text = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(text);
+      } catch (jsonErr) {
+        const cleanSnippet = text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+        return {
+          ok: false,
+          error: `接口返回了非预期的页面内容 (${res.status || '502'}): ${cleanSnippet || '服务暂时繁忙'}`,
+          translations: [],
+        };
+      }
+
+      if (!res.ok) {
+        return {
+          ok: false,
+          error: data?.error || `请求异常 (HTTP ${res.status})`,
+          translations: data?.translations || [],
+        };
+      }
+
+      return {
+        ok: true,
+        translations: data?.translations || [],
+        fallbackTriggered: data?.fallbackTriggered,
+        notes: data?.notes,
+      };
+    } catch (netErr: any) {
+      return {
+        ok: false,
+        error: netErr?.message || '网络连接超时',
+        translations: [],
+      };
+    }
+  };
+
   // Handler: Translate a single block
   const handleTranslateSingle = async (block: DocumentBlock) => {
     setBlocks((prev) =>
@@ -252,25 +320,18 @@ export default function App() {
 
     try {
       const activeGlossary = glossary.filter((g) => g.enabled);
-      const res = await fetch('/api/translate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          blocks: [{ id: block.id, type: block.type, sourceText: block.sourceText }],
-          sourceLang: meta.sourceLang,
-          targetLang: meta.targetLang,
-          promptTemplate: getCompiledPromptTemplate(),
-          glossary: activeGlossary,
-          stylePreference: selectedTemplate.stylePreference,
-          apiConfig,
-        }),
+      const result = await callApiTranslate({
+        blocks: [{ id: block.id, type: block.type, sourceText: block.sourceText }],
+        sourceLang: meta.sourceLang,
+        targetLang: meta.targetLang,
+        promptTemplate: getCompiledPromptTemplate(),
+        glossary: activeGlossary,
+        stylePreference: selectedTemplate.stylePreference,
+        apiConfig,
       });
 
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '翻译失败');
-
-      const item = data.translations?.[0];
-      if (item) {
+      const item = result.translations?.[0];
+      if (item && item.translation) {
         setBlocks((prev) =>
           prev.map((b) =>
             b.id === block.id
@@ -283,61 +344,78 @@ export default function App() {
               : b
           )
         );
+        if (result.fallbackTriggered) {
+          setAutoTranslateNotice('原模型出现提示，已自动通过免Key公共备选引擎译出本段');
+        }
       } else {
         setBlocks((prev) =>
           prev.map((b) => (b.id === block.id ? { ...b, isTranslating: false } : b))
         );
+        if (!result.ok) {
+          setAutoTranslateNotice(`单段翻译提示: ${result.error || '未能成功获取译文'}`);
+        }
       }
     } catch (err: any) {
       console.error('Single block translation error:', err);
-      alert(`翻译遇到问题: ${err.message}`);
       setBlocks((prev) =>
         prev.map((b) => (b.id === block.id ? { ...b, isTranslating: false } : b))
       );
+      setAutoTranslateNotice(`单段翻译提示: ${err.message || '网络连接异常'}`);
     }
   };
 
-  // Handler: Batch Translate All Blocks
-  const handleTranslateAll = async () => {
-    if (isTranslating || blocks.length === 0) return;
-    setIsTranslating(true);
+  // Auto-Translate Stream Engine: Streams translation ahead of current reading position
+  useEffect(() => {
+    if (!autoTranslateEnabled || isTranslating || blocks.length === 0) {
+      return;
+    }
 
-    const BATCH_SIZE = 4;
-    const activeGlossary = glossary.filter((g) => g.enabled);
+    const isUntranslated = (b: DocumentBlock) =>
+      !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText;
 
-    try {
-      for (let i = 0; i < blocks.length; i += BATCH_SIZE) {
-        const batch = blocks.slice(i, i + BATCH_SIZE);
-        const batchIds = new Set(batch.map((b) => b.id));
+    // Prioritize blocks in/near viewport starting from current read block index
+    const readIndex = Math.max(0, currentReadBlock - 1);
+    const downstream = blocks.slice(readIndex).filter((b) => isUntranslated(b) && !b.isTranslating);
+    const upstream = blocks.slice(0, readIndex).filter((b) => isUntranslated(b) && !b.isTranslating);
 
-        setBlocks((prev) =>
-          prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: true } : b))
-        );
+    const candidates = downstream.length > 0 ? downstream : upstream;
+    if (candidates.length === 0) {
+      return; // Everything translated
+    }
 
-        const res = await fetch('/api/translate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            blocks: batch.map((b) => ({
-              id: b.id,
-              type: b.type,
-              sourceText: b.sourceText,
-            })),
-            sourceLang: meta.sourceLang,
-            targetLang: meta.targetLang,
-            promptTemplate: getCompiledPromptTemplate(),
-            glossary: activeGlossary,
-            stylePreference: selectedTemplate.stylePreference,
-            apiConfig,
-          }),
+    // Take next batch of 3 blocks for smooth streaming without API throttling
+    const batch = candidates.slice(0, 3);
+    const batchIds = new Set(batch.map((b) => b.id));
+
+    const timer = setTimeout(async () => {
+      if (isAutoLoopRunningRef.current) return;
+      isAutoLoopRunningRef.current = true;
+
+      setBlocks((prev) =>
+        prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: true } : b))
+      );
+
+      try {
+        const activeGlossary = glossary.filter((g) => g.enabled);
+        const result = await callApiTranslate({
+          blocks: batch.map((b) => ({
+            id: b.id,
+            type: b.type,
+            sourceText: b.sourceText,
+          })),
+          sourceLang: meta.sourceLang,
+          targetLang: meta.targetLang,
+          promptTemplate: getCompiledPromptTemplate(),
+          glossary: activeGlossary,
+          stylePreference: selectedTemplate.stylePreference,
+          apiConfig,
         });
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || '批量翻译异常');
-
         const map = new Map<string, { translation: string; notes?: string }>();
-        (data.translations || []).forEach((t: any) => {
-          map.set(t.id, { translation: t.translation, notes: t.notes });
+        (result.translations || []).forEach((t: any) => {
+          if (t && t.id) {
+            map.set(t.id, { translation: t.translation, notes: t.notes });
+          }
         });
 
         setBlocks((prev) =>
@@ -346,7 +424,105 @@ export default function App() {
               const res = map.get(b.id)!;
               return {
                 ...b,
-                targetText: res.translation,
+                targetText: res.translation || b.targetText,
+                notes: res.notes,
+                isTranslating: false,
+              };
+            }
+            if (batchIds.has(b.id)) {
+              return { ...b, isTranslating: false };
+            }
+            return b;
+          })
+        );
+
+        if (result.ok) {
+          setAutoTranslateNotice(null);
+        } else {
+          setAutoTranslateNotice(`伴读流提示: ${result.error || '请求受阻，将自动顺延重试'}`);
+          await new Promise((r) => setTimeout(r, 4000));
+        }
+      } catch (err: any) {
+        console.warn('Auto stream translate warning:', err);
+        setBlocks((prev) =>
+          prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: false } : b))
+        );
+        setAutoTranslateNotice(`伴读翻译提示: ${err.message || '网络连接异常'}，稍后将自动续译`);
+        await new Promise((r) => setTimeout(r, 4000));
+      } finally {
+        isAutoLoopRunningRef.current = false;
+      }
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [
+    autoTranslateEnabled,
+    isTranslating,
+    blocks,
+    currentReadBlock,
+    meta.sourceLang,
+    meta.targetLang,
+    apiConfig,
+    selectedTemplate,
+    glossary,
+    typography.keepEnglishNames,
+  ]);
+
+  // Handler: Batch Translate All Untranslated Blocks
+  const handleTranslateAll = async () => {
+    if (isTranslating || blocks.length === 0) return;
+
+    // Filter only untranslated blocks to avoid wasting tokens and duplicate requests
+    const untranslated = blocks.filter(
+      (b) => !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText
+    );
+
+    if (untranslated.length === 0) {
+      alert('所有段落均已翻译完成！');
+      return;
+    }
+
+    setIsTranslating(true);
+    const BATCH_SIZE = 4;
+    const activeGlossary = glossary.filter((g) => g.enabled);
+
+    try {
+      for (let i = 0; i < untranslated.length; i += BATCH_SIZE) {
+        const batch = untranslated.slice(i, i + BATCH_SIZE);
+        const batchIds = new Set(batch.map((b) => b.id));
+
+        setBlocks((prev) =>
+          prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: true } : b))
+        );
+
+        const result = await callApiTranslate({
+          blocks: batch.map((b) => ({
+            id: b.id,
+            type: b.type,
+            sourceText: b.sourceText,
+          })),
+          sourceLang: meta.sourceLang,
+          targetLang: meta.targetLang,
+          promptTemplate: getCompiledPromptTemplate(),
+          glossary: activeGlossary,
+          stylePreference: selectedTemplate.stylePreference,
+          apiConfig,
+        });
+
+        const map = new Map<string, { translation: string; notes?: string }>();
+        (result.translations || []).forEach((t: any) => {
+          if (t && t.id) {
+            map.set(t.id, { translation: t.translation, notes: t.notes });
+          }
+        });
+
+        setBlocks((prev) =>
+          prev.map((b) => {
+            if (map.has(b.id)) {
+              const res = map.get(b.id)!;
+              return {
+                ...b,
+                targetText: res.translation || b.targetText,
                 notes: res.notes,
                 isTranslating: false,
               };
@@ -360,7 +536,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error('Batch translate error:', err);
-      alert(`批量翻译失败: ${err.message}`);
+      setAutoTranslateNotice(`批量翻译提示: ${err.message}`);
     } finally {
       setIsTranslating(false);
     }
@@ -692,6 +868,8 @@ export default function App() {
         isTranslating={isTranslating}
         translatedCount={translatedCount}
         totalCount={blocks.length}
+        autoTranslateEnabled={autoTranslateEnabled}
+        onToggleAutoTranslate={toggleAutoTranslate}
       />
 
       {/* Main Workspace Canvas */}
@@ -764,6 +942,20 @@ export default function App() {
               <span>{typography.keepEnglishNames ? '✓ 已开启英文原名人名' : '中文音译人名'}</span>
             </button>
 
+            {/* Auto Translate Stream Toggle */}
+            <button
+              onClick={toggleAutoTranslate}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border font-semibold transition ${
+                autoTranslateEnabled
+                  ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300'
+                  : 'border-zinc-200 dark:border-zinc-800 text-zinc-500 hover:text-zinc-800'
+              }`}
+              title="自动伴读翻译：阅读或滚动时，系统在后台自动顺延翻译后续段落"
+            >
+              <Zap className={`h-3.5 w-3.5 ${autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'}`} />
+              <span>伴读自动翻译: {autoTranslateEnabled ? '开启中' : '已暂停'}</span>
+            </button>
+
             {/* Bookmarks Quick Trigger */}
             <button
               onClick={() => setIsBookmarkDrawerOpen(true)}
@@ -779,7 +971,6 @@ export default function App() {
             </button>
 
             <span className="text-zinc-400 hidden sm:inline">|</span>
-
 
             <span className="text-zinc-500 hidden sm:inline">
               阅读底色：<strong>{currentTheme.name}</strong>
@@ -855,24 +1046,76 @@ export default function App() {
           isTranslating={isTranslating}
           totalWords={currentStoryStats.wordCount}
           estimatedMinutes={currentStoryStats.minutes}
+          autoTranslateEnabled={autoTranslateEnabled}
+          onToggleAutoTranslate={toggleAutoTranslate}
+          onTranslateAll={handleTranslateAll}
         />
 
+        {/* Auto-Translate Notice if retry/backoff */}
+        {autoTranslateNotice && (
+          <div className="no-print mb-4 px-3.5 py-2 rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 text-xs text-blue-800 dark:text-blue-300 flex items-center justify-between gap-2 shadow-2xs animate-fade-in">
+            <span className="flex items-center gap-1.5">
+              <Info className="h-4 w-4 text-blue-600 shrink-0" />
+              <span>{autoTranslateNotice}</span>
+            </span>
+            <button
+              onClick={() => setAutoTranslateNotice(null)}
+              className="text-[11px] font-semibold text-blue-600 hover:underline shrink-0"
+            >
+              关闭
+            </button>
+          </div>
+        )}
 
         {/* Mode Status Pill Notice when in Target-Only */}
         {viewMode === 'target-only' && (
-          <div className="no-print mb-4 px-3.5 py-2 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/80 dark:border-amber-800/40 text-xs text-amber-900 dark:text-amber-200 flex items-center justify-between gap-2 shadow-2xs">
-            <span className="flex items-center gap-1.5">
+          <div className="no-print mb-4 px-3.5 py-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/90 dark:border-amber-800/60 text-xs text-amber-900 dark:text-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-2xs">
+            <div className="flex items-center gap-2">
               <FileCheck className="h-4 w-4 text-[#990000] shrink-0" />
               <span>
-                <strong>当前已开启「纯译文 (全篇中文)」模式</strong> · 长按或点击段落可浮窗查看英文原文
+                <strong>「纯译文 (全篇中文)」伴读模式</strong>
+                {translatedCount < blocks.length ? (
+                  autoTranslateEnabled ? (
+                    <span className="ml-1 text-emerald-800 dark:text-emerald-300 font-semibold">
+                      · 正在后台智能伴读自动翻译下文（已译 {translatedCount}/{blocks.length} 段）
+                    </span>
+                  ) : (
+                    <span className="ml-1 text-amber-800 dark:text-amber-300">
+                      · 伴读自动翻译已暂停（已译 {translatedCount}/{blocks.length} 段）
+                    </span>
+                  )
+                ) : (
+                  <span className="ml-1 text-emerald-700 dark:text-emerald-400 font-semibold">
+                    · 全篇段落已全部翻译完成
+                  </span>
+                )}
               </span>
-            </span>
-            <button
-              onClick={() => setViewMode('interlinear')}
-              className="text-[11px] font-semibold text-[#990000] hover:underline shrink-0"
-            >
-              切回双语
-            </button>
+            </div>
+            <div className="flex items-center gap-2 self-end sm:self-auto text-[11px]">
+              {translatedCount < blocks.length && (
+                <button
+                  onClick={toggleAutoTranslate}
+                  className="px-2 py-1 rounded-md bg-white dark:bg-zinc-800 border border-amber-300 dark:border-amber-700 font-bold text-amber-900 dark:text-amber-200 hover:bg-amber-100 transition shadow-2xs"
+                >
+                  {autoTranslateEnabled ? '暂停自动伴读' : '开启自动伴读'}
+                </button>
+              )}
+              {translatedCount < blocks.length && (
+                <button
+                  onClick={handleTranslateAll}
+                  disabled={isTranslating}
+                  className="px-2 py-1 rounded-md bg-[#990000] text-white font-bold hover:bg-[#800000] transition shadow-2xs"
+                >
+                  加速全译
+                </button>
+              )}
+              <button
+                onClick={() => setViewMode('interlinear')}
+                className="font-semibold text-[#990000] hover:underline"
+              >
+                切回双语
+              </button>
+            </div>
           </div>
         )}
 
@@ -938,6 +1181,7 @@ export default function App() {
                     viewMode={viewMode}
                     typography={typography}
                     theme={currentTheme}
+                    autoTranslateEnabled={autoTranslateEnabled}
                     isBookmarked={bookmarks.some((b) => b.blockId === block.id)}
                     isHighlighted={highlightedBlockId === block.id}
                     onToggleBookmark={handleToggleBookmark}
@@ -953,7 +1197,7 @@ export default function App() {
       </main>
 
       {/* Mobile Sticky Bottom Navigation Bar */}
-      <div className="lg:hidden no-print fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border-t border-zinc-200 dark:border-zinc-800 px-3 py-2 flex items-center justify-around shadow-lg">
+      <div className="lg:hidden no-print fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-md border-t border-zinc-200 dark:border-zinc-800 px-2 py-2 flex items-center justify-around shadow-lg">
         {/* Toggle Mode Button: Dedicated & Highly visible */}
         <button
           onClick={() =>
@@ -961,7 +1205,7 @@ export default function App() {
               viewMode === 'target-only' ? 'interlinear' : 'target-only'
             )
           }
-          className={`flex flex-col items-center gap-0.5 px-2.5 py-1 rounded-xl transition ${
+          className={`flex flex-col items-center gap-0.5 px-2 py-1 rounded-xl transition ${
             viewMode === 'target-only'
               ? 'bg-[#990000]/10 text-[#990000] font-bold'
               : 'text-zinc-600 dark:text-zinc-300'
@@ -976,8 +1220,26 @@ export default function App() {
             <AlignJustify className="h-4 w-4" />
           )}
           <span className="text-[10px]">
-            {viewMode === 'target-only' ? '纯译文(开)' : '全译文'}
+            {viewMode === 'target-only' ? '纯译文' : '全译文'}
           </span>
+        </button>
+
+        {/* Auto Translate Stream Toggle on Mobile */}
+        <button
+          onClick={toggleAutoTranslate}
+          className={`flex flex-col items-center gap-0.5 px-2 py-1 text-[10px] transition ${
+            autoTranslateEnabled
+              ? 'text-emerald-700 dark:text-emerald-400 font-bold'
+              : 'text-zinc-500 dark:text-zinc-400 font-medium'
+          }`}
+          title="切换自动伴读流式翻译"
+        >
+          <Zap
+            className={`h-4 w-4 ${
+              autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'
+            }`}
+          />
+          <span>{autoTranslateEnabled ? '伴读开' : '伴读停'}</span>
         </button>
 
         {/* Style */}
@@ -996,7 +1258,7 @@ export default function App() {
           className="flex flex-col items-center gap-0.5 px-2 py-1 text-[10px] font-bold text-[#990000]"
         >
           <RefreshCw className={`h-4 w-4 ${isTranslating ? 'animate-spin' : ''}`} />
-          <span>{isTranslating ? '翻译中' : '全篇翻译'}</span>
+          <span>{isTranslating ? '翻译中' : '全译'}</span>
         </button>
 
         {/* Polish */}

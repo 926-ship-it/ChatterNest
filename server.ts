@@ -60,7 +60,7 @@ export interface UserApiConfig {
   autoFallbackToFree?: boolean;
 }
 
-// Helper: Parse JSON safely even if wrapped in markdown code fence
+// Helper: Safely parse JSON from text with markdown codeblock and slice recovery
 function extractJsonFromText(raw: string): any {
   let cleaned = (raw || '').trim();
   const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
@@ -68,7 +68,71 @@ function extractJsonFromText(raw: string): any {
   if (match) {
     cleaned = match[1].trim();
   }
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const firstBrace = cleaned.indexOf('{');
+    const lastBrace = cleaned.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(cleaned.slice(firstBrace, lastBrace + 1));
+      } catch {}
+    }
+    return {};
+  }
+}
+
+// Helper: Safely extract translations from model output with refusal recovery
+function safeExtractTranslations(
+  rawText: string,
+  blocks: BlockInput[]
+): Array<{ id: string; translation: string; notes?: string }> | null {
+  if (!rawText || !rawText.trim()) return null;
+
+  const trimmed = rawText.trim();
+
+  // Check for model safety refusal (e.g., when encountering adult/erotic fanfiction content)
+  const isRefusal =
+    /cannot translate|safety policy|sensitive|adult content|inappropriate|violates|policy guidelines|the page contains|content filter/i.test(
+      trimmed
+    );
+  if (isRefusal && !trimmed.includes('"translations"')) {
+    console.warn('[Model Refusal]: Model refused text due to safety filter:', trimmed.slice(0, 120));
+    return null; // Signal caller to automatically route to public non-censored translation
+  }
+
+  // 1. Try markdown code block extraction or direct JSON parse
+  try {
+    let candidate = trimmed;
+    const jsonBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/i;
+    const match = candidate.match(jsonBlockRegex);
+    if (match) candidate = match[1].trim();
+
+    const parsed = JSON.parse(candidate);
+    if (parsed && Array.isArray(parsed.translations) && parsed.translations.length > 0) {
+      return parsed.translations;
+    }
+  } catch (e) {
+    // 2. Substring slice between first { and last }
+    try {
+      const firstBrace = trimmed.indexOf('{');
+      const lastBrace = trimmed.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        const sliced = trimmed.slice(firstBrace, lastBrace + 1);
+        const parsed = JSON.parse(sliced);
+        if (parsed && Array.isArray(parsed.translations) && parsed.translations.length > 0) {
+          return parsed.translations;
+        }
+      }
+    } catch (e2) {}
+  }
+
+  // 3. Fallback: If blocks count is 1 and the model outputted plain text translation (not an error page)
+  if (blocks.length === 1 && trimmed.length > 0 && !isRefusal && !trimmed.startsWith('<!DOCTYPE') && !trimmed.startsWith('<html')) {
+    return [{ id: blocks[0].id, translation: trimmed, notes: '单段文本智能适配' }];
+  }
+
+  return null;
 }
 
 // Helper: Convert target language string to ISO code for public translation
@@ -83,13 +147,14 @@ function getLangPair(targetLang: string = 'Chinese (Simplified)'): string {
   return 'en|zh-CN';
 }
 
-// Helper: Free public translation (MyMemory Free API - no API Key required)
+// Helper: Free public translation with dual mirrors (MyMemory & Google Public) - handles adult content without censorship
 async function translateBlocksWithFreeEngine(
   blocks: BlockInput[],
   targetLang: string = 'Chinese (Simplified)',
   glossary: GlossaryItem[] = []
 ): Promise<Array<{ id: string; translation: string; notes: string }>> {
   const langPair = getLangPair(targetLang);
+  const targetIso = langPair.split('|')[1] || 'zh-CN';
   const results: Array<{ id: string; translation: string; notes: string }> = [];
 
   for (const block of blocks) {
@@ -99,46 +164,75 @@ async function translateBlocksWithFreeEngine(
       continue;
     }
 
+    let translated = '';
+    let engineNote = '免Key公共免费翻译';
+
+    // Mirror 1: Google public web translation endpoint (Fast, high uptime, handles adult/fanfiction without refusal)
     try {
-      // MyMemory free public endpoint (slices long single block to 500 chars to respect free payload)
-      const encoded = encodeURIComponent(text.slice(0, 500));
-      const url = `https://api.mymemory.translated.net/get?q=${encoded}&langpair=${langPair}`;
-      const resp = await fetch(url);
-      if (!resp.ok) {
-        throw new Error(`Public free API error HTTP ${resp.status}`);
+      const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetIso}&dt=t&q=${encodeURIComponent(text.slice(0, 1500))}`;
+      const gResp = await fetch(gUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+      if (gResp.ok) {
+        const gText = await gResp.text();
+        try {
+          const gData = JSON.parse(gText);
+          if (Array.isArray(gData) && Array.isArray(gData[0])) {
+            translated = gData[0].map((item: any) => item[0]).join('');
+            engineNote = '公共翻译镜像 (免Key无审查直译)';
+          }
+        } catch {}
       }
-      const data = (await resp.json()) as any;
-      let translated = data?.responseData?.translatedText || text;
-
-      // Clean HTML entities if returned
-      translated = translated
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-
-      // Apply glossary terms
-      glossary.forEach((g) => {
-        if (g.term && g.translation) {
-          const reg = new RegExp(g.term, 'gi');
-          translated = translated.replace(reg, g.translation);
-        }
-      });
-
-      results.push({
-        id: block.id,
-        translation: translated,
-        notes: '由免Key公共翻译备选引擎提供对照',
-      });
     } catch (e: any) {
-      console.warn(`Free translation fallback notice for block ${block.id}:`, e.message);
-      results.push({
-        id: block.id,
-        translation: text,
-        notes: `公共翻译引擎响应超时，保留原文对照`,
-      });
+      // Continue to Mirror 2
     }
+
+    // Mirror 2: MyMemory Free API
+    if (!translated) {
+      try {
+        const encoded = encodeURIComponent(text.slice(0, 500));
+        const url = `https://api.mymemory.translated.net/get?q=${encoded}&langpair=${langPair}`;
+        const resp = await fetch(url);
+        if (resp.ok) {
+          const rawResp = await resp.text();
+          try {
+            const data = JSON.parse(rawResp);
+            translated = data?.responseData?.translatedText || '';
+            if (translated) engineNote = 'MyMemory 备选翻译';
+          } catch {}
+        }
+      } catch (e: any) {
+        // Fallback
+      }
+    }
+
+    // If both mirrors fail or timeout, keep original text safely
+    if (!translated) {
+      translated = text;
+      engineNote = '公共翻译引擎连接超时，保留原文';
+    }
+
+    // Clean HTML entities if returned
+    translated = translated
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>');
+
+    // Apply glossary terms
+    glossary.forEach((g) => {
+      if (g.term && g.translation) {
+        const reg = new RegExp(g.term, 'gi');
+        translated = translated.replace(reg, g.translation);
+      }
+    });
+
+    results.push({
+      id: block.id,
+      translation: translated,
+      notes: engineNote,
+    });
   }
 
   return results;
@@ -210,7 +304,7 @@ async function callOpenAICompatible(params: {
       const errJson = JSON.parse(errorText);
       detail = errJson.error?.message || errJson.message || errorText;
     } catch {
-      detail = errorText.slice(0, 160);
+      detail = errorText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
     }
 
     let msg = `API 请求失败 (HTTP ${response.status}): ${detail}`;
@@ -224,7 +318,15 @@ async function callOpenAICompatible(params: {
     throw new Error(msg);
   }
 
-  const data = (await response.json()) as any;
+  const rawResponseText = await response.text();
+  let data: any = null;
+  try {
+    data = JSON.parse(rawResponseText);
+  } catch (err) {
+    const cleanSnippet = rawResponseText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 160);
+    throw new Error(`API 接口返回了非预期的非 JSON 内容 (HTTP ${response.status}): ${cleanSnippet || '服务暂时不可用'}`);
+  }
+
   const content = data?.choices?.[0]?.message?.content || '';
   return content;
 }
@@ -311,11 +413,11 @@ ${glossaryInstruction}`;
           responseFormatJson: true,
         });
 
-        const parsed = extractJsonFromText(rawResult);
-        if (parsed && Array.isArray(parsed.translations)) {
-          return res.json({ translations: parsed.translations, provider });
+        const translations = safeExtractTranslations(rawResult, blocks);
+        if (translations && translations.length > 0) {
+          return res.json({ translations, provider });
         } else {
-          throw new Error('API 返回的数据不包含预期的 translations 数组');
+          throw new Error('模型输出未包含标准 translations 数组 (可能触发了敏感内容/成人内容过滤)');
         }
       } catch (err: any) {
         console.error(`Error translating with ${provider}:`, err.message);
@@ -325,7 +427,7 @@ ${glossaryInstruction}`;
           return res.json({
             translations: freeTranslations.map((t) => ({
               ...t,
-              notes: `【备选引擎】${provider} 超限，已自动由免Key公共翻译完成`,
+              notes: `【备选引擎】${provider} 遇到提示 (${err.message.slice(0, 40)})，已自动由免Key公共翻译接管`,
             })),
             fallbackTriggered: true,
             originalError: err.message,
@@ -387,25 +489,22 @@ ${glossaryInstruction}`;
         },
       });
 
-      const parsed = JSON.parse(response.text || '{"translations":[]}');
-      return res.json({ ...parsed, provider: provider || 'gemini' });
+      const translations = safeExtractTranslations(response.text || '', blocks);
+      if (translations && translations.length > 0) {
+        return res.json({ translations, provider: provider || 'gemini' });
+      } else {
+        throw new Error('Gemini 模型返回内容未包含合法 JSON (可能触发了成人或特定词汇安全过滤)');
+      }
     } catch (geminiError: any) {
-      console.error('Gemini translation error:', geminiError);
+      console.error('Gemini translation error:', geminiError.message || geminiError);
 
-      // Check if error is quota exhaustion (429, ResourceExhausted)
-      const isQuotaError =
-        geminiError.status === 429 ||
-        /quota|exhausted|rate\s*limit|RESOURCE_EXHAUSTED/i.test(geminiError.message || '');
-
-      if ((isQuotaError || autoFallback) && autoFallback) {
-        console.warn(`[Auto-Fallback] Gemini quota reached or error occurred. Switching to Free Public Engine.`);
+      if (autoFallback) {
+        console.warn(`[Auto-Fallback] Gemini notice. Switching to Free Public Engine.`);
         const freeTranslations = await translateBlocksWithFreeEngine(blocks, targetLang, glossary);
         return res.json({
           translations: freeTranslations.map((t) => ({
             ...t,
-            notes: isQuotaError
-              ? '【备选引擎】Gemini 配额已用尽 (429)，已自动无缝切换至免Key公共翻译'
-              : `【备选引擎】已自动由公共翻译完成`,
+            notes: '【备选引擎】已自动无缝切换至免Key公共翻译完成',
           })),
           fallbackTriggered: true,
           originalError: geminiError.message,
@@ -416,8 +515,29 @@ ${glossaryInstruction}`;
     }
   } catch (error: any) {
     console.error('Translation top error:', error);
-    res.status(500).json({
-      error: error?.message || '翻译失败，请检查 API 设置或网络连接。',
+    try {
+      // Ultimate safety net: always return translated blocks using free public engine so user never sees crash
+      const { blocks = [], targetLang, glossary } = req.body || {};
+      if (Array.isArray(blocks) && blocks.length > 0) {
+        const freeTranslations = await translateBlocksWithFreeEngine(blocks, targetLang, glossary);
+        return res.json({
+          translations: freeTranslations.map((t) => ({
+            ...t,
+            notes: `【应急备选】已由公共翻译引擎成功译出`,
+          })),
+          fallbackTriggered: true,
+          originalError: error.message,
+        });
+      }
+    } catch (e2) {}
+
+    res.json({
+      translations: (req.body?.blocks || []).map((b: any) => ({
+        id: b.id,
+        translation: b.sourceText,
+        notes: `翻译遇阻: ${error?.message?.slice(0, 60) || '请检查网络'}`,
+      })),
+      error: error?.message || '翻译失败，请检查网络设置。',
     });
   }
 });

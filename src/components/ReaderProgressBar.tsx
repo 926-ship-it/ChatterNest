@@ -8,6 +8,8 @@ import {
   Eye,
   Sliders,
   Clock,
+  Zap,
+  Sparkles,
 } from 'lucide-react';
 import { ThemeConfig } from '../types/document';
 import { formatReadingTime } from '../utils/readingTime';
@@ -21,6 +23,9 @@ interface ReaderProgressBarProps {
   isTranslating?: boolean;
   totalWords?: number;
   estimatedMinutes?: number;
+  autoTranslateEnabled?: boolean;
+  onToggleAutoTranslate?: () => void;
+  onTranslateAll?: () => void;
 }
 
 export const ReaderProgressBar: React.FC<ReaderProgressBarProps> = ({
@@ -32,6 +37,9 @@ export const ReaderProgressBar: React.FC<ReaderProgressBarProps> = ({
   isTranslating = false,
   totalWords = 0,
   estimatedMinutes = 0,
+  autoTranslateEnabled = true,
+  onToggleAutoTranslate,
+  onTranslateAll,
 }) => {
   const [activeMetric, setActiveMetric] = useState<'both' | 'translated' | 'reading'>('both');
 
@@ -108,23 +116,53 @@ export const ReaderProgressBar: React.FC<ReaderProgressBarProps> = ({
         </div>
 
 
-        {/* Quick jump or translation status */}
-        <div className="flex items-center gap-2 self-end sm:self-auto text-[11px]">
+        {/* Auto-translate stream controls and quick jump */}
+        <div className="flex items-center gap-2 self-end sm:self-auto text-[11px] flex-wrap">
+          {/* Auto Translate Stream Toggle */}
+          {onToggleAutoTranslate && (
+            <button
+              onClick={onToggleAutoTranslate}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border transition font-medium ${
+                autoTranslateEnabled
+                  ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300'
+                  : 'border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+              }`}
+              title="自动流式伴读翻译：阅读或滚动时，系统在后台自动翻译即将阅读的段落"
+            >
+              <Zap className={`h-3 w-3 ${autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'}`} />
+              <span>伴读自动翻译: {autoTranslateEnabled ? '开启中' : '已暂停'}</span>
+            </button>
+          )}
+
           {isTranslating ? (
-            <span className="flex items-center gap-1 text-[#990000] font-medium animate-pulse">
+            <span className="flex items-center gap-1 text-[#990000] font-medium animate-pulse px-2 py-0.5 rounded-md bg-red-50 dark:bg-red-950/40">
               <RefreshCw className="h-3 w-3 animate-spin" />
-              正在翻译中...
+              <span>伴读翻译中...</span>
             </span>
           ) : (
-            translatedBlocks < totalBlocks && onJumpToUntranslated && (
-              <button
-                onClick={onJumpToUntranslated}
-                className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 transition"
-                title="跳至首个未翻译段落"
-              >
-                <ArrowDownCircle className="h-3 w-3" />
-                <span>跳至未译段落</span>
-              </button>
+            translatedBlocks < totalBlocks && (
+              <>
+                {onTranslateAll && (
+                  <button
+                    onClick={onTranslateAll}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#990000] text-white hover:bg-[#800000] transition shadow-2xs font-semibold"
+                    title="立即加速翻译剩余全篇"
+                  >
+                    <Sparkles className="h-3 w-3" />
+                    <span>一键全篇速译</span>
+                  </button>
+                )}
+                {onJumpToUntranslated && (
+                  <button
+                    onClick={onJumpToUntranslated}
+                    className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 hover:bg-amber-100 transition"
+                    title="跳至首个未翻译段落"
+                  >
+                    <ArrowDownCircle className="h-3 w-3" />
+                    <span>定位未译</span>
+                  </button>
+                )}
+              </>
             )
           )}
         </div>

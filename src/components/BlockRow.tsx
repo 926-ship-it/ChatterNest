@@ -21,6 +21,7 @@ interface BlockRowProps {
   viewMode: ViewMode;
   typography: TypographyConfig;
   theme: ThemeConfig;
+  autoTranslateEnabled?: boolean;
   isBookmarked?: boolean;
   isHighlighted?: boolean;
   onToggleBookmark?: (block: DocumentBlock, index: number) => void;
@@ -35,6 +36,7 @@ export const BlockRow: React.FC<BlockRowProps> = ({
   viewMode,
   typography,
   theme,
+  autoTranslateEnabled = true,
   isBookmarked = false,
   isHighlighted = false,
   onToggleBookmark,
@@ -352,7 +354,18 @@ export const BlockRow: React.FC<BlockRowProps> = ({
                 }}
               >
                 {isLi && <span className="mr-1.5 opacity-60">•</span>}
-                {block.targetText || (block.isTranslating ? '正在翻译中...' : '点击即可翻译此段落')}
+                {block.targetText || (block.isTranslating ? (
+                  <span className="text-[#990000] inline-flex items-center gap-1 text-xs animate-pulse">
+                    <RefreshCw className="h-3 w-3 animate-spin" /> 正在智能伴读翻译中...
+                  </span>
+                ) : autoTranslateEnabled ? (
+                  <span className="text-amber-700 dark:text-amber-400 text-xs not-italic inline-flex items-center gap-1">
+                    <Sparkles className="h-3 w-3 text-amber-500" />
+                    <span>伴读排队中... (点击优先翻译)</span>
+                  </span>
+                ) : (
+                  '点击即可翻译此段落'
+                ))}
               </div>
             )}
 
@@ -400,7 +413,26 @@ export const BlockRow: React.FC<BlockRowProps> = ({
               }}
             >
               {isLi && <span className="mr-1">•</span>}
-              {block.targetText || (block.isTranslating ? '正在翻译中...' : '（尚未翻译）')}
+              {block.targetText || (block.isTranslating ? (
+                <span className="text-[#990000] inline-flex items-center gap-1 text-xs animate-pulse font-normal">
+                  <RefreshCw className="h-3 w-3 animate-spin" /> 正在智能伴读翻译中...
+                </span>
+              ) : autoTranslateEnabled ? (
+                <span
+                  onClick={() => onTranslateSingle(block)}
+                  className="text-amber-700 dark:text-amber-400 text-xs not-italic cursor-pointer hover:underline inline-flex items-center gap-1"
+                >
+                  <Sparkles className="h-3 w-3 text-amber-500" />
+                  <span>伴读排队中... (点击优先翻译)</span>
+                </span>
+              ) : (
+                <span
+                  onClick={() => onTranslateSingle(block)}
+                  className="text-zinc-400 text-xs italic cursor-pointer hover:underline"
+                >
+                  （尚未翻译，点击此处立即翻译）
+                </span>
+              ))}
             </div>
 
             {/* Quick mini toolbar */}
@@ -500,7 +532,20 @@ export const BlockRow: React.FC<BlockRowProps> = ({
               </span>
             </span>
           ) : block.isTranslating ? (
-            <span className="text-[#990000] animate-pulse">正在翻译此段落...</span>
+            <span className="inline-flex items-center gap-1.5 text-xs text-[#990000] dark:text-red-400 py-1 px-3 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/50 animate-pulse font-medium">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              <span>正在智能伴读翻译本段...</span>
+            </span>
+          ) : autoTranslateEnabled ? (
+            <span
+              onClick={() => onTranslateSingle(block)}
+              className="text-xs text-amber-800 dark:text-amber-300 bg-amber-50/90 dark:bg-amber-950/50 px-3 py-1.5 rounded-lg border border-amber-200 dark:border-amber-800/60 cursor-pointer hover:bg-amber-100 dark:hover:bg-amber-900/50 transition inline-flex items-center gap-1.5 shadow-2xs group"
+              title="伴读流正在自动翻译中，也可点击立即优先翻译此段"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-amber-600 animate-pulse" />
+              <span>伴读流排队中，即将自动译出</span>
+              <span className="text-[11px] underline opacity-75 group-hover:opacity-100 font-semibold">（点击优先翻译）</span>
+            </span>
           ) : (
             <span
               onClick={() => onTranslateSingle(block)}

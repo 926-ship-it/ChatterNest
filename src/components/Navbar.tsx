@@ -16,6 +16,7 @@ import {
   Bookmark as BookmarkIcon,
   Library,
   Cpu,
+  Zap,
 } from 'lucide-react';
 import { ViewMode, DocumentMeta, UserApiConfig } from '../types/document';
 import { WinkingBirdIcon } from './WinkingBirdIcon';
@@ -41,6 +42,8 @@ interface NavbarProps {
   isTranslating: boolean;
   translatedCount: number;
   totalCount: number;
+  autoTranslateEnabled?: boolean;
+  onToggleAutoTranslate?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -62,6 +65,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   isTranslating,
   translatedCount,
   totalCount,
+  autoTranslateEnabled = true,
+  onToggleAutoTranslate,
 }) => {
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -248,6 +253,26 @@ export const Navbar: React.FC<NavbarProps> = ({
               <Sparkles className="h-3.5 w-3.5 text-purple-600" />
               <span>AI润色</span>
             </button>
+
+            {/* Auto Translate Stream Toggle */}
+            {onToggleAutoTranslate && (
+              <button
+                onClick={onToggleAutoTranslate}
+                className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-semibold shadow-xs transition ${
+                  autoTranslateEnabled
+                    ? 'border-emerald-300 dark:border-emerald-700 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300'
+                    : 'border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-zinc-500 hover:text-zinc-800'
+                }`}
+                title="自动伴读翻译：阅读或滚动时，系统在后台自动翻译下文"
+              >
+                <Zap
+                  className={`h-3.5 w-3.5 ${
+                    autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'
+                  }`}
+                />
+                <span>伴读流: {autoTranslateEnabled ? '开启' : '暂停'}</span>
+              </button>
+            )}
 
             {/* Translate All */}
             <button
@@ -439,6 +464,27 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <Sparkles className="h-4 w-4 text-purple-600" />
                   <span>AI 全篇智能润色</span>
                 </button>
+                {onToggleAutoTranslate && (
+                  <button
+                    onClick={() => {
+                      onToggleAutoTranslate();
+                    }}
+                    className={`w-full flex items-center justify-between px-3 py-2 text-xs font-semibold rounded-lg text-left transition ${
+                      autoTranslateEnabled
+                        ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+                        : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400'
+                    }`}
+                  >
+                    <span className="flex items-center gap-2">
+                      <Zap className={`h-4 w-4 ${autoTranslateEnabled ? 'fill-emerald-500 text-emerald-500' : 'text-zinc-400'}`} />
+                      <span>自动伴读流式翻译</span>
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-black/5 dark:bg-white/10 font-bold">
+                      {autoTranslateEnabled ? '开启中' : '已暂停'}
+                    </span>
+                  </button>
+                )}
+
                 <button
                   onClick={onTranslateAll}
                   disabled={isTranslating}
