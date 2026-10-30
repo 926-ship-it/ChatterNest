@@ -420,105 +420,72 @@ export default function App() {
     }
   };
 
-  // Real-time Viewport Intersection Observer: Detects which blocks are physically visible on screen
+  // Persistent Scroll-to-Translate Worker (Never cancelled by scrolling)
   const visibleBlockIdsRef = useRef<Set<string>>(new Set());
+  const isWorkerBusyRef = useRef(false);
+  const queueTimerRef = useRef<any>(null);
 
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      (entries) => {
-        let hasNewVisible = false;
-        entries.forEach((entry) => {
-          const id = entry.target.getAttribute('data-block-id');
-          if (!id) return;
-          if (entry.isIntersecting) {
-            if (!visibleBlockIdsRef.current.has(id)) {
-              visibleBlockIdsRef.current.add(id);
-              hasNewVisible = true;
-            }
-          } else {
-            visibleBlockIdsRef.current.delete(id);
-          }
-        });
+  const triggerScrollTranslate = useCallback(() => {
+    if (!autoTranslateEnabled || blocksRef.current.length === 0) return;
+    if (isWorkerBusyRef.current) return;
 
-        if (hasNewVisible) {
-          // Immediately trigger translate loop for blocks entering view!
-          setAutoQueueTrigger((t) => t + 1);
+    if (queueTimerRef.current) {
+      clearTimeout(queueTimerRef.current);
+    }
+
+    queueTimerRef.current = setTimeout(async () => {
+      if (isWorkerBusyRef.current) return;
+      if (!autoTranslateEnabled || blocksRef.current.length === 0) return;
+
+      const currentBlocks = blocksRef.current;
+      const isUntranslated = (b: DocumentBlock) =>
+        !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText;
+
+      // 1. TOP PRIORITY: Any untranslated block visible in viewport or near reading position!
+      const readIdx = Math.max(0, currentReadBlock - 1);
+      const viewportCandidateIds = new Set(visibleBlockIdsRef.current);
+      // Guarantee surrounding 20 blocks around current read position as viewport candidates
+      currentBlocks.slice(Math.max(0, readIdx - 4), readIdx + 20).forEach((b) => {
+        viewportCandidateIds.add(b.id);
+      });
+
+      const visibleUntranslated = currentBlocks.filter(
+        (b) => viewportCandidateIds.has(b.id) && isUntranslated(b) && !b.isTranslating
+      );
+
+      // 2. Downstream blocks ahead of viewport
+      const downstream = currentBlocks
+        .slice(readIdx + 20, readIdx + 50)
+        .filter((b) => isUntranslated(b) && !b.isTranslating);
+
+      // 3. Upstream blocks
+      const upstream = currentBlocks
+        .slice(0, Math.max(0, readIdx - 4))
+        .filter((b) => isUntranslated(b) && !b.isTranslating);
+
+      let batch: DocumentBlock[] = [];
+      if (visibleUntranslated.length > 0) {
+        batch = visibleUntranslated.slice(0, 8);
+        if (batch.length < 8) {
+          const extra = downstream
+            .filter((d) => !batch.some((b) => b.id === d.id))
+            .slice(0, 8 - batch.length);
+          batch = [...batch, ...extra];
         }
-      },
-      {
-        root: null,
-        // Prefetch buffer: 250px above viewport and 600px below viewport so scrolling is seamless
-        rootMargin: '250px 0px 600px 0px',
-        threshold: 0.02,
+      } else if (downstream.length > 0) {
+        batch = downstream.slice(0, 8);
+      } else if (upstream.length > 0) {
+        batch = upstream.slice(0, 8);
       }
-    );
 
-    const elements = document.querySelectorAll('.reader-block-row');
-    elements.forEach((el) => observer.observe(el));
-
-    return () => {
-      observer.disconnect();
-    };
-  }, [visibleBlocks]);
-
-  // Scroll-to-Translate Engine: Translates whatever is visible on screen with top priority!
-  useEffect(() => {
-    if (!autoTranslateEnabled || isTranslating || blocksRef.current.length === 0) {
-      return;
-    }
-
-    const currentBlocks = blocksRef.current;
-    const isUntranslated = (b: DocumentBlock) =>
-      !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText;
-
-    // 1. TOP PRIORITY: Untranslated blocks currently visible inside the viewport!
-    const visibleUntranslated = currentBlocks.filter(
-      (b) => visibleBlockIdsRef.current.has(b.id) && isUntranslated(b) && !b.isTranslating
-    );
-
-    // 2. SECOND PRIORITY: Downstream blocks directly ahead of current reading block
-    const readIndex = Math.max(0, currentReadBlock - 1);
-    const downstream = currentBlocks
-      .slice(readIndex, readIndex + 25)
-      .filter((b) => isUntranslated(b) && !b.isTranslating);
-
-    // 3. THIRD PRIORITY: Remaining blocks
-    const farDownstream = currentBlocks
-      .slice(readIndex + 25)
-      .filter((b) => isUntranslated(b) && !b.isTranslating);
-    const upstream = currentBlocks
-      .slice(0, readIndex)
-      .filter((b) => isUntranslated(b) && !b.isTranslating);
-
-    let batch: DocumentBlock[] = [];
-    if (visibleUntranslated.length > 0) {
-      batch = visibleUntranslated.slice(0, 8);
-      if (batch.length < 8) {
-        // Pre-fetch downstream blocks to fill batch of 8
-        const additional = downstream
-          .filter((b) => !batch.some((x) => x.id === b.id))
-          .slice(0, 8 - batch.length);
-        batch = [...batch, ...additional];
+      if (batch.length === 0) {
+        return; // All translated!
       }
-    } else if (downstream.length > 0) {
-      batch = downstream.slice(0, 8);
-    } else if (farDownstream.length > 0) {
-      batch = farDownstream.slice(0, 8);
-    } else {
-      batch = upstream.slice(0, 8);
-    }
 
-    if (batch.length === 0) {
-      return; // Everything translated
-    }
+      const batchIds = new Set(batch.map((b) => b.id));
+      isWorkerBusyRef.current = true;
 
-    const batchIds = new Set(batch.map((b) => b.id));
-    let isCancelled = false;
-
-    const timer = setTimeout(async () => {
-      if (isAutoLoopRunningRef.current || isCancelled) return;
-      isAutoLoopRunningRef.current = true;
-
+      // Mark blocks as currently translating so UI shows active translation progress
       setBlocks((prev) =>
         prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: true } : b))
       );
@@ -539,8 +506,6 @@ export default function App() {
           apiConfig,
         });
 
-        if (isCancelled) return;
-
         const map = new Map<string, { translation: string; notes?: string }>();
         (result.translations || []).forEach((t: any) => {
           if (t && t.id) {
@@ -548,6 +513,7 @@ export default function App() {
           }
         });
 
+        // Apply translations
         setBlocks((prev) =>
           prev.map((b) => {
             if (map.has(b.id)) {
@@ -568,44 +534,24 @@ export default function App() {
 
         if (result.ok) {
           setAutoTranslateNotice(null);
-          // Calm delay before queuing next batch so UI remains completely responsive
-          setTimeout(() => {
-            if (!isCancelled) {
-              setAutoQueueTrigger((t) => t + 1);
-            }
-          }, 100);
         } else {
           setAutoTranslateNotice(`随译流提示: ${result.error || '请求受阻，将自动顺延重试'}`);
-          setTimeout(() => {
-            if (!isCancelled) {
-              setAutoQueueTrigger((t) => t + 1);
-            }
-          }, 2500);
         }
       } catch (err: any) {
-        console.warn('Scroll translate warning:', err);
+        console.warn('Scroll translate worker error:', err);
         setBlocks((prev) =>
           prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: false } : b))
         );
-        setAutoTranslateNotice(`翻译提示: ${err.message || '网络连接异常'}，稍后将自动续译`);
-        setTimeout(() => {
-          if (!isCancelled) {
-            setAutoQueueTrigger((t) => t + 1);
-          }
-        }, 2500);
       } finally {
-        isAutoLoopRunningRef.current = false;
+        isWorkerBusyRef.current = false;
+        // Schedule next batch immediately
+        setTimeout(() => {
+          triggerScrollTranslate();
+        }, 60);
       }
-    }, 30);
-
-    return () => {
-      isCancelled = true;
-      clearTimeout(timer);
-    };
+    }, 20);
   }, [
     autoTranslateEnabled,
-    isTranslating,
-    autoQueueTrigger,
     currentReadBlock,
     meta.sourceLang,
     meta.targetLang,
@@ -614,6 +560,51 @@ export default function App() {
     glossary,
     typography.keepEnglishNames,
   ]);
+
+  // Real-time Viewport Intersection Observer
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let changed = false;
+        entries.forEach((entry) => {
+          const id = entry.target.getAttribute('data-block-id');
+          if (!id) return;
+          if (entry.isIntersecting) {
+            if (!visibleBlockIdsRef.current.has(id)) {
+              visibleBlockIdsRef.current.add(id);
+              changed = true;
+            }
+          } else {
+            if (visibleBlockIdsRef.current.has(id)) {
+              visibleBlockIdsRef.current.delete(id);
+              changed = true;
+            }
+          }
+        });
+
+        if (changed) {
+          triggerScrollTranslate();
+        }
+      },
+      {
+        root: null,
+        rootMargin: '250px 0px 500px 0px',
+        threshold: 0.01,
+      }
+    );
+
+    const elements = document.querySelectorAll('.reader-block-row');
+    elements.forEach((el) => observer.observe(el));
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [visibleBlocks, triggerScrollTranslate]);
+
+  // Trigger translate on reading position change or story mount
+  useEffect(() => {
+    triggerScrollTranslate();
+  }, [blocks.length, currentReadBlock, triggerScrollTranslate]);
 
   // Handler: Batch Translate All Untranslated Blocks (High Speed 12-block concurrency)
   const handleTranslateAll = async () => {
