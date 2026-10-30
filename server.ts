@@ -147,7 +147,88 @@ function getLangPair(targetLang: string = 'Chinese (Simplified)'): string {
   return 'en|zh-CN';
 }
 
-// Helper: Free public translation with dual mirrors (MyMemory & Google Public) - handles adult content without censorship
+// Helper: Free public translation for a single block
+async function translateSingleFreeBlock(
+  block: BlockInput,
+  targetIso: string,
+  langPair: string,
+  glossary: GlossaryItem[]
+): Promise<{ id: string; translation: string; notes: string }> {
+  const text = (block.sourceText || '').trim();
+  if (!text) {
+    return { id: block.id, translation: '', notes: '免Key公共免费翻译' };
+  }
+
+  let translated = '';
+  let engineNote = '免Key极速直译';
+
+  // Mirror 1: Google Web Translate (Fast ~150ms, no key, no censorship on fanfiction/adult literature)
+  try {
+    const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetIso}&dt=t&q=${encodeURIComponent(text.slice(0, 2000))}`;
+    const gResp = await fetch(gUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      },
+    });
+    if (gResp.ok) {
+      const gText = await gResp.text();
+      try {
+        const gData = JSON.parse(gText);
+        if (Array.isArray(gData) && Array.isArray(gData[0])) {
+          translated = gData[0].map((item: any) => item[0]).join('');
+          engineNote = '极速直译 (免Key并发直连)';
+        }
+      } catch {}
+    }
+  } catch (e: any) {}
+
+  // Mirror 2: MyMemory Free API (if Mirror 1 didn't return text)
+  if (!translated) {
+    try {
+      const encoded = encodeURIComponent(text.slice(0, 500));
+      const url = `https://api.mymemory.translated.net/get?q=${encoded}&langpair=${langPair}`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const rawResp = await resp.text();
+        try {
+          const data = JSON.parse(rawResp);
+          translated = data?.responseData?.translatedText || '';
+          if (translated) engineNote = 'MyMemory 备用翻译';
+        } catch {}
+      }
+    } catch (e: any) {}
+  }
+
+  // Fallback: keep original text
+  if (!translated) {
+    translated = text;
+    engineNote = '公共引擎网络繁忙，保留原文对照';
+  }
+
+  // Clean HTML entities if returned
+  translated = translated
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+
+  // Apply glossary terms
+  glossary.forEach((g) => {
+    if (g.term && g.translation) {
+      const reg = new RegExp(g.term, 'gi');
+      translated = translated.replace(reg, g.translation);
+    }
+  });
+
+  return {
+    id: block.id,
+    translation: translated,
+    notes: engineNote,
+  };
+}
+
+// Helper: Free public translation with concurrent parallel execution (Blazing fast!)
 async function translateBlocksWithFreeEngine(
   blocks: BlockInput[],
   targetLang: string = 'Chinese (Simplified)',
@@ -155,87 +236,11 @@ async function translateBlocksWithFreeEngine(
 ): Promise<Array<{ id: string; translation: string; notes: string }>> {
   const langPair = getLangPair(targetLang);
   const targetIso = langPair.split('|')[1] || 'zh-CN';
-  const results: Array<{ id: string; translation: string; notes: string }> = [];
 
-  for (const block of blocks) {
-    const text = (block.sourceText || '').trim();
-    if (!text) {
-      results.push({ id: block.id, translation: '', notes: '免Key公共免费翻译' });
-      continue;
-    }
-
-    let translated = '';
-    let engineNote = '免Key公共免费翻译';
-
-    // Mirror 1: Google public web translation endpoint (Fast, high uptime, handles adult/fanfiction without refusal)
-    try {
-      const gUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetIso}&dt=t&q=${encodeURIComponent(text.slice(0, 1500))}`;
-      const gResp = await fetch(gUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-      });
-      if (gResp.ok) {
-        const gText = await gResp.text();
-        try {
-          const gData = JSON.parse(gText);
-          if (Array.isArray(gData) && Array.isArray(gData[0])) {
-            translated = gData[0].map((item: any) => item[0]).join('');
-            engineNote = '公共翻译镜像 (免Key无审查直译)';
-          }
-        } catch {}
-      }
-    } catch (e: any) {
-      // Continue to Mirror 2
-    }
-
-    // Mirror 2: MyMemory Free API
-    if (!translated) {
-      try {
-        const encoded = encodeURIComponent(text.slice(0, 500));
-        const url = `https://api.mymemory.translated.net/get?q=${encoded}&langpair=${langPair}`;
-        const resp = await fetch(url);
-        if (resp.ok) {
-          const rawResp = await resp.text();
-          try {
-            const data = JSON.parse(rawResp);
-            translated = data?.responseData?.translatedText || '';
-            if (translated) engineNote = 'MyMemory 备选翻译';
-          } catch {}
-        }
-      } catch (e: any) {
-        // Fallback
-      }
-    }
-
-    // If both mirrors fail or timeout, keep original text safely
-    if (!translated) {
-      translated = text;
-      engineNote = '公共翻译引擎连接超时，保留原文';
-    }
-
-    // Clean HTML entities if returned
-    translated = translated
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>');
-
-    // Apply glossary terms
-    glossary.forEach((g) => {
-      if (g.term && g.translation) {
-        const reg = new RegExp(g.term, 'gi');
-        translated = translated.replace(reg, g.translation);
-      }
-    });
-
-    results.push({
-      id: block.id,
-      translation: translated,
-      notes: engineNote,
-    });
-  }
-
-  return results;
+  // Run all blocks in parallel for sub-second batch translation
+  return await Promise.all(
+    blocks.map((block) => translateSingleFreeBlock(block, targetIso, langPair, glossary))
+  );
 }
 
 // Helper: Call any OpenAI-compatible API endpoint (DeepSeek, Groq, SiliconFlow, OpenRouter, Moonshot, Custom)

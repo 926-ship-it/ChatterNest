@@ -157,6 +157,7 @@ export const BlockRow: React.FC<BlockRowProps> = ({
   return (
     <div
       id={`block-${block.id}`}
+      data-block-index={index}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => {
         setIsHovered(false);
@@ -171,7 +172,7 @@ export const BlockRow: React.FC<BlockRowProps> = ({
       style={{
         marginBottom: `${typography.paragraphSpacing}px`,
       }}
-      className={`group relative rounded-xl transition-all duration-300 p-2 sm:p-3 print-bilingual-row select-text ${
+      className={`reader-block-row group relative rounded-xl transition-all duration-300 p-2 sm:p-3 select-text ${
         isPressing ? 'scale-[0.998] bg-red-500/10' : ''
       } ${
         isHighlighted

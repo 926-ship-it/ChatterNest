@@ -213,30 +213,50 @@ export default function App() {
   }, []);
 
 
-  // 6. Reading Progress Tracker based on viewport scroll position
+  // 6. Fast, accurate reading position tracker (O(1) elementFromPoint)
   const [currentReadBlock, setCurrentReadBlock] = useState(1);
 
   useEffect(() => {
-    const handleScroll = () => {
-      const blockElements = document.querySelectorAll('.print-bilingual-row');
-      if (blockElements.length === 0) return;
+    let ticking = false;
 
-      const scrollPosition = window.scrollY + 280;
-      let activeIndex = 0;
+    const updateCurrentBlock = () => {
+      // Find element in upper third of visible viewport
+      const sampleY = Math.min(window.innerHeight * 0.35, 260);
+      const sampleX = Math.min(window.innerWidth * 0.5, 450);
+      const elAtPoint = document.elementFromPoint(sampleX, sampleY);
 
-      blockElements.forEach((el, idx) => {
-        const top = (el as HTMLElement).offsetTop;
-        if (scrollPosition >= top) {
-          activeIndex = idx;
+      if (elAtPoint) {
+        const row = elAtPoint.closest('.reader-block-row') as HTMLElement | null;
+        if (row && row.dataset.blockIndex) {
+          const idx = parseInt(row.dataset.blockIndex, 10);
+          if (!isNaN(idx) && idx >= 0) {
+            setCurrentReadBlock(idx + 1);
+            ticking = false;
+            return;
+          }
         }
-      });
+      }
 
-      setCurrentReadBlock(Math.min(blocks.length, Math.max(1, activeIndex + 1)));
+      // Proportional fallback from window scroll ratio
+      const docHeight = document.documentElement.scrollHeight - window.innerHeight;
+      if (docHeight > 0 && blocks.length > 0) {
+        const ratio = Math.max(0, Math.min(1, window.scrollY / docHeight));
+        const estimated = Math.max(1, Math.min(blocks.length, Math.floor(ratio * blocks.length) + 1));
+        setCurrentReadBlock(estimated);
+      }
+      ticking = false;
     };
 
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    handleScroll();
-    return () => window.removeEventListener('scroll', handleScroll);
+    const onScroll = () => {
+      if (!ticking) {
+        window.requestAnimationFrame(updateCurrentBlock);
+        ticking = true;
+      }
+    };
+
+    window.addEventListener('scroll', onScroll, { passive: true });
+    updateCurrentBlock();
+    return () => window.removeEventListener('scroll', onScroll);
   }, [blocks.length]);
 
   const handleJumpToUntranslated = () => {
@@ -244,9 +264,9 @@ export default function App() {
       (b) => !b.targetText || !b.targetText.trim() || b.targetText === b.sourceText
     );
     if (untranslatedIdx !== -1) {
-      const blockElements = document.querySelectorAll('.print-bilingual-row');
-      if (blockElements[untranslatedIdx]) {
-        blockElements[untranslatedIdx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const el = document.getElementById(`block-${blocks[untranslatedIdx].id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }
   };
@@ -375,16 +395,34 @@ export default function App() {
 
     // Prioritize blocks in/near viewport starting from current read block index
     const readIndex = Math.max(0, currentReadBlock - 1);
-    const downstream = blocks.slice(readIndex).filter((b) => isUntranslated(b) && !b.isTranslating);
-    const upstream = blocks.slice(0, readIndex).filter((b) => isUntranslated(b) && !b.isTranslating);
+    // Immediate downstream (the next 20 blocks directly in front of the reader)
+    const immediateDownstream = blocks
+      .slice(readIndex, readIndex + 20)
+      .filter((b) => isUntranslated(b) && !b.isTranslating);
 
-    const candidates = downstream.length > 0 ? downstream : upstream;
+    // Far downstream
+    const farDownstream = blocks
+      .slice(readIndex + 20)
+      .filter((b) => isUntranslated(b) && !b.isTranslating);
+
+    // Upstream (if user skipped any earlier)
+    const upstream = blocks
+      .slice(0, readIndex)
+      .filter((b) => isUntranslated(b) && !b.isTranslating);
+
+    const candidates =
+      immediateDownstream.length > 0
+        ? immediateDownstream
+        : farDownstream.length > 0
+        ? farDownstream
+        : upstream;
+
     if (candidates.length === 0) {
       return; // Everything translated
     }
 
-    // Take next batch of 3 blocks for smooth streaming without API throttling
-    const batch = candidates.slice(0, 3);
+    // High-speed parallel batch: 8 blocks concurrently!
+    const batch = candidates.slice(0, 8);
     const batchIds = new Set(batch.map((b) => b.id));
 
     const timer = setTimeout(async () => {
@@ -440,7 +478,7 @@ export default function App() {
           setAutoTranslateNotice(null);
         } else {
           setAutoTranslateNotice(`伴读流提示: ${result.error || '请求受阻，将自动顺延重试'}`);
-          await new Promise((r) => setTimeout(r, 4000));
+          await new Promise((r) => setTimeout(r, 2000));
         }
       } catch (err: any) {
         console.warn('Auto stream translate warning:', err);
@@ -448,11 +486,11 @@ export default function App() {
           prev.map((b) => (batchIds.has(b.id) ? { ...b, isTranslating: false } : b))
         );
         setAutoTranslateNotice(`伴读翻译提示: ${err.message || '网络连接异常'}，稍后将自动续译`);
-        await new Promise((r) => setTimeout(r, 4000));
+        await new Promise((r) => setTimeout(r, 2000));
       } finally {
         isAutoLoopRunningRef.current = false;
       }
-    }, 450);
+    }, 60);
 
     return () => clearTimeout(timer);
   }, [
@@ -468,7 +506,7 @@ export default function App() {
     typography.keepEnglishNames,
   ]);
 
-  // Handler: Batch Translate All Untranslated Blocks
+  // Handler: Batch Translate All Untranslated Blocks (High Speed 12-block concurrency)
   const handleTranslateAll = async () => {
     if (isTranslating || blocks.length === 0) return;
 
@@ -483,7 +521,7 @@ export default function App() {
     }
 
     setIsTranslating(true);
-    const BATCH_SIZE = 4;
+    const BATCH_SIZE = 12;
     const activeGlossary = glossary.filter((g) => g.enabled);
 
     try {
