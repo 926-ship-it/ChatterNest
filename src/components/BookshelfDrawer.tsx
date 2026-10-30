@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { BookshelfStory } from '../types/document';
 import { calculateStoryStats, formatReadingTime } from '../utils/readingTime';
+import { WinkingBirdIcon } from './WinkingBirdIcon';
 
 interface BookshelfDrawerProps {
   isOpen: boolean;
@@ -80,9 +81,35 @@ export const BookshelfDrawer: React.FC<BookshelfDrawerProps> = ({
     return { totalShelfWords: words, totalShelfMinutes: mins };
   }, [bookshelf]);
 
+  // Extract distinct fandoms & authors for 1-click filter chips
+  const quickFilterChips = useMemo(() => {
+    const fandomSet = new Set<string>();
+    const authorSet = new Set<string>();
 
-  // Filtered stories
+    bookshelf.forEach((s) => {
+      s.fandoms?.forEach((f) => {
+        if (f.trim()) fandomSet.add(f.trim());
+      });
+      s.ao3Meta?.fandoms?.forEach((f) => {
+        if (f.trim()) fandomSet.add(f.trim());
+      });
+      if (s.author) {
+        const shortName = s.author.split('(')[0].trim() || s.author;
+        authorSet.add(shortName);
+      }
+    });
+
+    return {
+      fandoms: Array.from(fandomSet).slice(0, 5),
+      authors: Array.from(authorSet).slice(0, 4),
+    };
+  }, [bookshelf]);
+
+  // Filtered stories with multi-field search (title, author, or fandom name)
   const filteredStories = useMemo(() => {
+    const query = searchQuery.toLowerCase().trim();
+    const terms = query ? query.split(/\s+/).filter(Boolean) : [];
+
     return bookshelf.filter((story) => {
       // Filter by tab
       const isCurrent = story.id === currentStoryId;
@@ -92,18 +119,31 @@ export const BookshelfDrawer: React.FC<BookshelfDrawerProps> = ({
       if (filterTab === 'completed' && !isCompleted) return false;
       if (filterTab === 'in_progress' && isCompleted) return false;
 
-      // Filter by search query
-      if (searchQuery.trim()) {
-        const query = searchQuery.toLowerCase();
-        const matchesTitle = story.title.toLowerCase().includes(query);
-        const matchesAuthor = story.author?.toLowerCase().includes(query) ?? false;
-        const matchesFandom = story.fandoms?.some((f) => f.toLowerCase().includes(query)) ?? false;
-        return matchesTitle || matchesAuthor || matchesFandom;
+      // Filter by search query (checks title, author, fandom, and tags)
+      if (terms.length > 0) {
+        const titleText = (story.title || '').toLowerCase();
+        const authorText = (story.author || story.ao3Meta?.author || '').toLowerCase();
+        const fandomText = [
+          ...(story.fandoms || []),
+          ...(story.ao3Meta?.fandoms || []),
+          ...(story.ao3Meta?.additionalTags || []),
+          ...(story.ao3Meta?.characters || []),
+        ]
+          .map((f) => f.toLowerCase())
+          .join(' ');
+
+        // Every term must be found in at least one of title, author, or fandom
+        const matchesAllTerms = terms.every(
+          (t) => titleText.includes(t) || authorText.includes(t) || fandomText.includes(t)
+        );
+
+        if (!matchesAllTerms) return false;
       }
 
       return true;
     });
   }, [bookshelf, currentStoryId, filterTab, searchQuery]);
+
 
   // Backup entire shelf to JSON file
   const handleExportBackup = () => {
@@ -154,13 +194,13 @@ export const BookshelfDrawer: React.FC<BookshelfDrawerProps> = ({
         {/* Top Header */}
         <div className="flex items-center justify-between px-4 sm:px-6 py-3.5 border-b border-amber-900/10 dark:border-zinc-800 bg-white/80 dark:bg-zinc-900/80 backdrop-blur-sm">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-[#990000] to-amber-700 text-white shadow-xs">
-              <Library className="h-5 w-5" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-tr from-[#990000] to-amber-700 text-white shadow-sm ring-1 ring-amber-500/20">
+              <WinkingBirdIcon className="h-6 w-6 drop-shadow-xs" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base sm:text-lg font-bold text-zinc-900 dark:text-zinc-100">
-                  我的本地书架
+                <h2 className="text-base sm:text-lg font-bold text-zinc-900 dark:text-zinc-100 flex items-center gap-1.5">
+                  <span>我的本地书架</span>
                 </h2>
                 <span className="px-2 py-0.5 rounded-full text-[11px] font-bold bg-[#990000]/10 text-[#990000] dark:bg-[#990000]/20 font-mono">
                   {bookshelf.length} 部作品
@@ -242,21 +282,90 @@ export const BookshelfDrawer: React.FC<BookshelfDrawerProps> = ({
           </div>
         </div>
 
-        {/* Toolbar: Actions & Filter Bar */}
-        <div className="p-3 sm:p-4 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-          {/* Search & Tabs */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-1">
-            <div className="relative flex-1 max-w-xs">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400" />
-              <input
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="搜索标题、作者、标签..."
-                className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 text-xs focus:ring-2 focus:ring-[#990000]/20 focus:outline-none"
-              />
-            </div>
+        {/* Top Search Bar & Filters Section */}
+        <div className="p-3.5 sm:p-4 bg-white dark:bg-zinc-900 border-b border-zinc-200 dark:border-zinc-800 space-y-3">
+          {/* Prominent Full-Width Search Input */}
+          <div className="relative">
+            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-400 dark:text-zinc-500" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="搜索书架作品：按标题 (Title)、作者 (Author)、原作/同人分类 (Fandom)..."
+              className="w-full pl-10 pr-9 py-2 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-zinc-50/80 dark:bg-zinc-800/80 text-sm placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:bg-white dark:focus:bg-zinc-800 focus:ring-2 focus:ring-[#990000]/25 focus:border-[#990000] focus:outline-none transition shadow-2xs"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200/60 dark:hover:bg-zinc-700/60 transition"
+                title="清空搜索"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
 
+          {/* Quick Filter Chips (Authors & Fandoms) */}
+          {(quickFilterChips.fandoms.length > 0 || quickFilterChips.authors.length > 0) && (
+            <div className="flex items-center gap-1.5 flex-wrap text-xs">
+              <span className="text-[11px] text-zinc-400 dark:text-zinc-500 font-medium mr-1">快捷筛选:</span>
+              {quickFilterChips.fandoms.map((fandom) => {
+                const isActive = searchQuery.toLowerCase().includes(fandom.toLowerCase());
+                return (
+                  <button
+                    key={`fandom-${fandom}`}
+                    onClick={() => {
+                      if (isActive) {
+                        setSearchQuery('');
+                      } else {
+                        setSearchQuery(fandom);
+                      }
+                    }}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] transition ${
+                      isActive
+                        ? 'bg-[#990000] text-white font-semibold shadow-2xs'
+                        : 'bg-amber-100/70 hover:bg-amber-100 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200 dark:hover:bg-amber-900/60 border border-amber-300/40'
+                    }`}
+                  >
+                    <span>{fandom}</span>
+                  </button>
+                );
+              })}
+              {quickFilterChips.authors.map((author) => {
+                const isActive = searchQuery.toLowerCase().includes(author.toLowerCase());
+                return (
+                  <button
+                    key={`author-${author}`}
+                    onClick={() => {
+                      if (isActive) {
+                        setSearchQuery('');
+                      } else {
+                        setSearchQuery(author);
+                      }
+                    }}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] transition ${
+                      isActive
+                        ? 'bg-zinc-800 dark:bg-zinc-200 text-white dark:text-zinc-900 font-semibold shadow-2xs'
+                        : 'bg-zinc-100 hover:bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 border border-zinc-200/80 dark:border-zinc-700'
+                    }`}
+                  >
+                    <span>{author}</span>
+                  </button>
+                );
+              })}
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery('')}
+                  className="text-[11px] text-zinc-400 hover:text-[#990000] underline ml-1 cursor-pointer"
+                >
+                  重置筛选
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Controls: Tabs & Actions */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-1">
             {/* Filter Tabs */}
             <div className="flex items-center gap-1 bg-zinc-100 dark:bg-zinc-800 p-1 rounded-lg text-xs font-medium text-zinc-600 dark:text-zinc-300">
               <button
@@ -300,59 +409,71 @@ export const BookshelfDrawer: React.FC<BookshelfDrawerProps> = ({
                 翻译中
               </button>
             </div>
+
+            {/* Quick Actions (Backup, Restore, Save, Import) */}
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button
+                onClick={onSaveCurrentStory}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#990000]/30 bg-[#990000]/5 hover:bg-[#990000]/10 text-[#990000] text-xs font-semibold shadow-xs transition"
+                title="将当前工作台正在阅读的故事更新或存入书架"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>更新当前作品</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  onClose();
+                  onImportNewStory();
+                }}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#990000] hover:bg-[#800000] text-white text-xs font-semibold shadow-xs transition"
+                title="导入新作品到书架"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>导入新作品</span>
+              </button>
+
+              <button
+                onClick={handleExportBackup}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 text-xs font-medium shadow-xs transition"
+                title="下载全部书架备份到本地磁盘 (JSON)"
+              >
+                <FolderDown className="h-3.5 w-3.5 text-zinc-500" />
+                <span>备份书架</span>
+              </button>
+
+              <label
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 text-xs font-medium shadow-xs transition cursor-pointer"
+                title="从 JSON 备份文件恢复书架"
+              >
+                <FolderUp className="h-3.5 w-3.5 text-zinc-500" />
+                <span>恢复备份</span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".json"
+                  className="hidden"
+                  onChange={handleFileChange}
+                />
+              </label>
+            </div>
           </div>
 
-          {/* Quick Actions (Backup, Restore, Save, Import) */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {/* Save current document to shelf */}
-            <button
-              onClick={onSaveCurrentStory}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[#990000]/30 bg-[#990000]/5 hover:bg-[#990000]/10 text-[#990000] text-xs font-semibold shadow-xs transition"
-              title="将当前工作台正在阅读的故事更新或存入书架"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              <span>更新当前作品</span>
-            </button>
-
-            {/* Import new story */}
-            <button
-              onClick={() => {
-                onClose();
-                onImportNewStory();
-              }}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#990000] hover:bg-[#800000] text-white text-xs font-semibold shadow-xs transition"
-              title="导入新作品到书架"
-            >
-              <Plus className="h-3.5 w-3.5" />
-              <span>导入新作品</span>
-            </button>
-
-            {/* Export full backup */}
-            <button
-              onClick={handleExportBackup}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 text-xs font-medium shadow-xs transition"
-              title="下载全部书架备份到本地磁盘 (JSON)"
-            >
-              <FolderDown className="h-3.5 w-3.5 text-zinc-500" />
-              <span>备份书架</span>
-            </button>
-
-            {/* Restore backup */}
-            <label
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 hover:bg-zinc-50 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-200 text-xs font-medium shadow-xs transition cursor-pointer"
-              title="从 JSON 备份文件恢复书架"
-            >
-              <FolderUp className="h-3.5 w-3.5 text-zinc-500" />
-              <span>恢复备份</span>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json"
-                className="hidden"
-                onChange={handleFileChange}
-              />
-            </label>
-          </div>
+          {/* Search Result Feedback Indicator */}
+          {searchQuery && (
+            <div className="flex items-center justify-between text-xs px-2 py-1 bg-amber-50/70 dark:bg-amber-950/20 rounded-md border border-amber-200/50 dark:border-amber-900/30 text-amber-900 dark:text-amber-200">
+              <span className="flex items-center gap-1.5">
+                <Search className="h-3.5 w-3.5 text-amber-600" />
+                <span>已找到 <strong>{filteredStories.length}</strong> 部包含关键字 “{searchQuery}” 的作品</span>
+              </span>
+              <button
+                onClick={() => setSearchQuery('')}
+                className="text-xs text-amber-800 dark:text-amber-300 hover:underline font-semibold"
+              >
+                清除搜索
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Stories Grid / Cards Area */}
@@ -360,24 +481,35 @@ export const BookshelfDrawer: React.FC<BookshelfDrawerProps> = ({
           {filteredStories.length === 0 ? (
             <div className="text-center py-16 px-4">
               <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-100 dark:bg-amber-950/60 text-[#990000] mb-3">
-                <BookOpen className="h-8 w-8" />
+                {searchQuery ? <Search className="h-8 w-8" /> : <BookOpen className="h-8 w-8" />}
               </div>
               <h3 className="text-sm sm:text-base font-bold text-zinc-800 dark:text-zinc-200">
-                没有找到匹配的书架作品
+                {searchQuery ? `未找到与 “${searchQuery}” 匹配的作品` : '没有找到匹配的书架作品'}
               </h3>
               <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 max-w-sm mx-auto">
-                您可以通过「导入新作品」添加 HTML、PDF 或文本文件，也可以载入王尔德或欧·亨利的公版经典名篇。
+                {searchQuery
+                  ? '您可以尝试精简关键词（支持搜索作品标题、作者姓名或原作/同人分类），或者重置搜索条件。'
+                  : '您可以通过「导入新作品」添加 HTML、PDF 或文本文件，也可以载入王尔德或欧·亨利的公版经典名篇。'}
               </p>
               <div className="mt-4 flex justify-center gap-2">
-                <button
-                  onClick={() => {
-                    onClose();
-                    onImportNewStory();
-                  }}
-                  className="px-4 py-2 rounded-xl bg-[#990000] text-white text-xs font-bold hover:bg-[#800000] shadow-sm transition"
-                >
-                  去导入新故事
-                </button>
+                {searchQuery ? (
+                  <button
+                    onClick={() => setSearchQuery('')}
+                    className="px-4 py-2 rounded-xl bg-[#990000] text-white text-xs font-bold hover:bg-[#800000] shadow-sm transition"
+                  >
+                    清空搜索条件
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      onClose();
+                      onImportNewStory();
+                    }}
+                    className="px-4 py-2 rounded-xl bg-[#990000] text-white text-xs font-bold hover:bg-[#800000] shadow-sm transition"
+                  >
+                    去导入新故事
+                  </button>
+                )}
               </div>
             </div>
           ) : (

@@ -17,6 +17,8 @@ import {
   Library,
 } from 'lucide-react';
 import { ViewMode, DocumentMeta } from '../types/document';
+import { WinkingBirdIcon } from './WinkingBirdIcon';
+
 
 interface NavbarProps {
   meta: DocumentMeta;
@@ -64,14 +66,23 @@ export const Navbar: React.FC<NavbarProps> = ({
       <div className="mx-auto flex h-14 sm:h-16 max-w-7xl items-center justify-between px-3 sm:px-6">
         {/* Left: Brand & Document Info (Single-line, zero overlap on any mobile screen) */}
         <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink">
-          <div className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-[#990000] via-[#c23b3b] to-amber-600 text-white shadow-xs">
-            <Languages className="h-4 w-4" />
+          <div
+            onClick={onOpenBookshelf}
+            className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-tr from-[#990000] via-[#c23b3b] to-amber-600 text-white shadow-xs cursor-pointer hover:scale-105 active:scale-95 transition-transform"
+            title="ChatterNest · 点击进入本地书架"
+          >
+            <WinkingBirdIcon className="h-5 w-5 sm:h-6 sm:w-6 drop-shadow-xs" />
           </div>
 
           <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
-            <span className="font-black text-sm sm:text-base tracking-tight text-zinc-900 dark:text-zinc-100 whitespace-nowrap">
+            <span
+              onClick={onOpenBookshelf}
+              className="font-black text-sm sm:text-base tracking-tight text-zinc-900 dark:text-zinc-100 whitespace-nowrap cursor-pointer hover:text-[#990000] transition-colors"
+              title="ChatterNest · 故事双语伴读工作台"
+            >
               ChatterNest
             </span>
+
             {/* Compact percent badge on mobile */}
             <span className="text-[10px] font-mono font-semibold px-1.5 py-0.5 rounded-md bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-300 whitespace-nowrap">
               {percent}%
